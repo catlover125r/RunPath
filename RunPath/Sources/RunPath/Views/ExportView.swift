@@ -50,6 +50,7 @@ struct ExportView: View {
     @EnvironmentObject var storage: RouteStorage
     @State private var orientation: ExportOrientation = .portrait
     @State private var resolution: ExportResolution = .hd
+    @State private var showStats = true
     @State private var exportProgress: Double = 0
     @State private var isExporting = false
     @State private var isSavingToPhotos = false
@@ -97,10 +98,8 @@ struct ExportView: View {
 
     private var readyView: some View {
         VStack(spacing: 32) {
-            // Preview thumbnail placeholder
             orientationPreview
 
-            // Orientation picker
             VStack(alignment: .leading, spacing: 10) {
                 sectionLabel("Orientation")
                 HStack(spacing: 10) {
@@ -110,7 +109,6 @@ struct ExportView: View {
                 }
             }
 
-            // Resolution picker
             VStack(alignment: .leading, spacing: 10) {
                 sectionLabel("Resolution")
                 HStack(spacing: 10) {
@@ -120,6 +118,32 @@ struct ExportView: View {
                 }
             }
 
+            // Stats overlay toggle
+            VStack(alignment: .leading, spacing: 10) {
+                sectionLabel("Overlay")
+                Toggle(isOn: $showStats) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "chart.bar.fill")
+                            .font(.system(size: 15))
+                            .frame(width: 20)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Run Stats")
+                                .font(.system(size: 14, weight: .semibold))
+                            Text("Distance, time & pace")
+                                .font(.system(size: 11))
+                                .opacity(0.55)
+                        }
+                    }
+                }
+                .toggleStyle(.switch)
+                .tint(Color.white)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .background(Color.white.opacity(0.08),
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+
             if let err = exportError {
                 Text(err)
                     .font(.system(size: 13))
@@ -127,7 +151,6 @@ struct ExportView: View {
                     .multilineTextAlignment(.center)
             }
 
-            // Spec summary
             let size = resolution.size(for: orientation)
             Text("\(Int(size.width)) × \(Int(size.height))  ·  H.264  ·  30 fps")
                 .font(.system(size: 13, design: .monospaced))
@@ -254,6 +277,11 @@ struct ExportView: View {
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.3))
             }
+            Text("Keep this screen open while rendering")
+                .font(.system(size: 11))
+                .foregroundStyle(.white.opacity(0.2))
+                .multilineTextAlignment(.center)
+                .padding(.top, 4)
         }
     }
 
@@ -331,7 +359,8 @@ struct ExportView: View {
         let config = VideoExporter.ExportConfig(
             resolution: resolution.size(for: orientation),
             orientation: orientation,
-            mapType: mapType
+            mapType: mapType,
+            showStats: showStats
         )
         let e = VideoExporter()
         exporter = e

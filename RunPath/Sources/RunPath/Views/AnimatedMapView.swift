@@ -1,11 +1,9 @@
 import SwiftUI
 import MapKit
+import Combine
 
 // MARK: - Screen-space path overlay
 
-// Draws the route as a CAShapeLayer in the view's own coordinate system.
-// Screen-space drawing means line width never changes with camera zoom/tilt,
-// and updates are immediate — no MapKit tile-pipeline lag.
 final class PathOverlayView: UIView {
     private let shapeLayer = CAShapeLayer()
 
@@ -63,7 +61,6 @@ struct AnimatedMapView: UIViewRepresentable {
     @ObservedObject var vm: AnimationViewModel
     var mapType: MKMapType
 
-    // Return a plain container so PathOverlayView is guaranteed above the map
     func makeUIView(context: Context) -> UIView {
         let container = UIView()
 
@@ -92,10 +89,12 @@ struct AnimatedMapView: UIViewRepresentable {
 
     func updateUIView(_ container: UIView, context: Context) {
         guard let map = context.coordinator.mapView else { return }
-        // Keep subview frames in sync (SwiftUI may resize the container)
         map.frame = container.bounds
         context.coordinator.pathOverlayView?.frame = container.bounds
         if map.mapType != mapType { map.mapType = mapType }
+        // Wire up the direct Combine subscription so slider/button changes
+        // never wait on SwiftUI's reconciliation cycle.
+        context.coordinator.bind(to: vm)
         context.coordinator.update(mapView: map, vm: vm)
     }
 
@@ -107,8 +106,31 @@ struct AnimatedMapView: UIViewRepresentable {
         weak var mapView: MKMapView?
         var pathOverlayView: PathOverlayView?
 
+        private var cancellables = Set<AnyCancellable>()
+        private weak var observedVM: AnimationViewModel?
+
+        // Subscribe to vm changes directly so camera and path update immediately
+        // regardless of SwiftUI's update batching.
+        func bind(to vm: AnimationViewModel) {
+            guard observedVM !== vm else { return }
+            observedVM = vm
+            cancellables.removeAll()
+
+            // objectWillChange fires BEFORE properties change; .delay(.zero) defers
+            // the sink to the next run-loop turn so we read the updated values.
+            vm.objectWillChange
+                .delay(for: .zero, scheduler: RunLoop.main)
+                .sink { [weak self] _ in
+                    guard let self,
+                          let map = self.mapView,
+                          let vm = self.observedVM else { return }
+                    self.update(mapView: map, vm: vm)
+                }
+                .store(in: &cancellables)
+        }
+
         func update(mapView: MKMapView, vm: AnimationViewModel) {
-            let rawCoords     = vm.route?.clCoordinates ?? []
+            let rawCoords      = vm.route?.clCoordinates ?? []
             let smoothedCoords = vm.smoothedCoordinates
             let count    = vm.visibleCoordinateCount
             let showFull = vm.showFullRoute
@@ -118,12 +140,12 @@ struct AnimatedMapView: UIViewRepresentable {
 
             let visibleCount = showFull ? rawCoords.count : max(0, count)
 
-            // Update camera first — coordinate conversion uses the updated projection
+            // Camera first — coordinate projection depends on the new camera transform
             updateCamera(mapView: mapView, vm: vm,
                          rawCoords: rawCoords, smoothedCoords: smoothedCoords,
                          visibleCount: visibleCount, showFull: showFull)
 
-            // Draw raw GPS path in screen space
+            // Then draw the raw GPS path in screen space
             pathOverlayView?.update(coordinates: rawCoords,
                                     visibleCount: visibleCount,
                                     lineHue: hue, lineWidth: width,

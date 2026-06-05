@@ -13,6 +13,7 @@ struct FrameParams {
     let smoothness: Double
     let showFull: Bool
     let isLandscape: Bool
+    let showStats: Bool
 }
 
 @MainActor
@@ -24,6 +25,7 @@ class VideoExporter {
         var frameRate: Int32 = 30
         var videoBitrate: Int = 8_000_000
         var mapType: MKMapType = .standard
+        var showStats: Bool = false
     }
 
     enum ExportError: LocalizedError {
@@ -114,12 +116,10 @@ class VideoExporter {
         animProgress.append(1.0)
 
         let animationFrames = animProgress.count
-        // Pullback: ~15% extra frames at full extent
         let pullbackCount = max(30, Int(Double(animationFrames) * 0.15))
         let allProgressValues = animProgress + Array(repeating: 1.0, count: pullbackCount)
         let totalFrames = allProgressValues.count
 
-        // Pre-compute every frame's parameters
         let allParams: [FrameParams] = (0..<totalFrames).map { frame in
             let showFull = frame >= animationFrames
             let fp = allProgressValues[frame]
@@ -136,16 +136,16 @@ class VideoExporter {
                 lineHue:      settings.value(for: .lineColor, at: fp),
                 smoothness:   settings.value(for: .smoothness, at: fp),
                 showFull:     showFull,
-                isLandscape:  isLandscape
+                isLandscape:  isLandscape,
+                showStats:    config.showStats
             )
         }
 
         let renderer = SnapshotRenderer(route: route, outputSize: config.resolution, mapType: config.mapType)
         let encodeQueue = DispatchQueue(label: "com.runpath.encode", qos: .userInitiated)
 
-        // 2 concurrent snapshotters — enough overlap without overwhelming MapKit's tile fetcher
         let batchSize = 2
-        var lastBuffer: CVPixelBuffer?  // fallback for failed frames so no timestamps are skipped
+        var lastBuffer: CVPixelBuffer?
 
         for batchStart in stride(from: 0, to: totalFrames, by: batchSize) {
             if cancelled {
@@ -171,8 +171,6 @@ class VideoExporter {
             for (i, img) in images.enumerated() {
                 let frameIdx = batchStart + i
 
-                // If rendering failed, fall back to the last good frame so no timestamp is skipped.
-                // Skipped timestamps create gaps that make the video appear to fast-forward.
                 let buffer: CVPixelBuffer?
                 if let img {
                     buffer = pixelBuffer(from: img, size: config.resolution)
@@ -241,7 +239,6 @@ class SnapshotRenderer {
     private let mapType: MKMapType
 
     private let maxSnapshotDim: CGFloat = 1080
-
     private var smoothCache: [Int: [CLLocationCoordinate2D]] = [:]
 
     init(route: GPXRoute, outputSize: CGSize, mapType: MKMapType) {
@@ -252,21 +249,16 @@ class SnapshotRenderer {
     }
 
     func render(params: FrameParams) async throws -> UIImage {
-        // Smoothed coords: camera position and heading only
         let smoothed = cachedSmoothed(factor: params.smoothness)
         let visibleSmoothed = Array(smoothed.prefix(max(1, params.visibleCount)))
-
-        // Raw coords: the actual drawn path
         let visibleRaw = Array(rawCoords.prefix(max(1, params.visibleCount)))
 
         let center = params.showFull ? route.centerCoordinate : (visibleSmoothed.last ?? smoothed[0])
-
         let travelHeading = bearing(of: visibleSmoothed)
         let heading = params.isLandscape
             ? (travelHeading + 90).truncatingRemainder(dividingBy: 360)
             : travelHeading
 
-        // Cap snapshot size so MKMapSnapshotter never sees > 1080px
         let maxDim = max(outputSize.width, outputSize.height)
         let snapshotScale = maxDim > maxSnapshotDim ? maxSnapshotDim / maxDim : 1.0
         let snapshotSize = CGSize(width: outputSize.width * snapshotScale,
@@ -286,26 +278,120 @@ class SnapshotRenderer {
         let snapshotter = MKMapSnapshotter(options: options)
         let snapshot = try await snapshotter.start()
 
-        // Composite at full output resolution — scales the map up, draws raw path at full size
         let upscale = 1.0 / snapshotScale
         let renderer = UIGraphicsImageRenderer(size: outputSize)
-        return renderer.image { _ in
+        return renderer.image { ctx in
             snapshot.image.draw(in: CGRect(origin: .zero, size: outputSize))
-            guard visibleRaw.count > 1 else { return }
-            let path = UIBezierPath()
-            let first = snapshot.point(for: visibleRaw[0])
-            path.move(to: CGPoint(x: first.x * upscale, y: first.y * upscale))
-            for coord in visibleRaw.dropFirst() {
-                let pt = snapshot.point(for: coord)
-                path.addLine(to: CGPoint(x: pt.x * upscale, y: pt.y * upscale))
+
+            // Draw raw GPS path
+            if visibleRaw.count > 1 {
+                let path = UIBezierPath()
+                let first = snapshot.point(for: visibleRaw[0])
+                path.move(to: CGPoint(x: first.x * upscale, y: first.y * upscale))
+                for coord in visibleRaw.dropFirst() {
+                    let pt = snapshot.point(for: coord)
+                    path.addLine(to: CGPoint(x: pt.x * upscale, y: pt.y * upscale))
+                }
+                UIColor(hue: CGFloat(params.lineHue), saturation: 0.85,
+                        brightness: 1.0, alpha: 1.0).setStroke()
+                path.lineWidth = params.lineWidth
+                path.lineCapStyle = .round
+                path.lineJoinStyle = .round
+                path.stroke()
             }
-            UIColor(hue: CGFloat(params.lineHue), saturation: 0.85, brightness: 1.0, alpha: 1.0).setStroke()
-            path.lineWidth = params.lineWidth
-            path.lineCapStyle = .round
-            path.lineJoinStyle = .round
-            path.stroke()
+
+            // Stats overlay
+            if params.showStats {
+                drawStatsOverlay(ctx: ctx, size: outputSize)
+            }
         }
     }
+
+    // MARK: - Stats overlay
+
+    private func drawStatsOverlay(ctx: UIGraphicsRendererContext, size: CGSize) {
+        let cgCtx = ctx.cgContext
+
+        // Black gradient from transparent → opaque rising from bottom edge
+        let shortSide = min(size.width, size.height)
+        let gradHeight = shortSide * 0.40
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let colors = [UIColor.black.withAlphaComponent(0).cgColor,
+                      UIColor.black.withAlphaComponent(0.82).cgColor] as CFArray
+        if let gradient = CGGradient(colorsSpace: colorSpace, colors: colors, locations: [0.0, 1.0]) {
+            cgCtx.drawLinearGradient(
+                gradient,
+                start: CGPoint(x: 0, y: size.height - gradHeight),
+                end:   CGPoint(x: 0, y: size.height),
+                options: []
+            )
+        }
+
+        // Format stat strings
+        let distStr = GPXRoute.formatDistance(route.totalDistance)
+        let timeStr = GPXRoute.formatDuration(route.duration)
+        let paceStr: String
+        if route.totalDistance > 0 && route.duration > 0 {
+            let secsPerKm = route.duration / (route.totalDistance / 1000)
+            paceStr = String(format: "%d:%02d/km", Int(secsPerKm) / 60, Int(secsPerKm) % 60)
+        } else {
+            paceStr = "—"
+        }
+
+        // Font sizes scaled to the short side (consistent across portrait & landscape)
+        let distValueSize = shortSide * 0.090
+        let sideValueSize = shortSide * 0.054
+        let labelSize     = shortSide * 0.026
+
+        let bottomPad  = size.height * 0.058
+        let labelGap   = shortSide * 0.014
+        let sideOffset = size.width * 0.28
+        let centerX    = size.width * 0.50
+        let leftX      = centerX - sideOffset
+        let rightX     = centerX + sideOffset
+
+        drawStatColumn(value: distStr,  label: "DISTANCE", cx: centerX,
+                       valueSize: distValueSize, labelSize: labelSize * 1.1,
+                       bottomPad: bottomPad, labelGap: labelGap,
+                       valueAlpha: 1.0, labelAlpha: 0.60)
+        drawStatColumn(value: timeStr,  label: "TIME",     cx: leftX,
+                       valueSize: sideValueSize, labelSize: labelSize,
+                       bottomPad: bottomPad, labelGap: labelGap,
+                       valueAlpha: 0.88, labelAlpha: 0.50)
+        drawStatColumn(value: paceStr,  label: "PACE",     cx: rightX,
+                       valueSize: sideValueSize, labelSize: labelSize,
+                       bottomPad: bottomPad, labelGap: labelGap,
+                       valueAlpha: 0.88, labelAlpha: 0.50)
+    }
+
+    private func drawStatColumn(value: String, label: String,
+                                cx: CGFloat, valueSize: CGFloat, labelSize: CGFloat,
+                                bottomPad: CGFloat, labelGap: CGFloat,
+                                valueAlpha: CGFloat, labelAlpha: CGFloat) {
+        let size = outputSize
+        let valAttrs: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: valueSize, weight: .bold),
+            .foregroundColor: UIColor.white.withAlphaComponent(valueAlpha)
+        ]
+        let lblAttrs: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: labelSize, weight: .semibold),
+            .foregroundColor: UIColor.white.withAlphaComponent(labelAlpha),
+            .kern: 1.8 as NSNumber
+        ]
+        let valNS = value as NSString
+        let lblNS = label as NSString
+        let valSz = valNS.size(withAttributes: valAttrs)
+        let lblSz = lblNS.size(withAttributes: lblAttrs)
+
+        // Value sits just above the bottom padding, label sits above that
+        let valY = size.height - bottomPad - valSz.height
+        let lblY = valY - labelGap - lblSz.height
+
+        valNS.draw(at: CGPoint(x: cx - valSz.width / 2, y: valY), withAttributes: valAttrs)
+        lblNS.draw(at: CGPoint(x: cx - lblSz.width / 2, y: lblY), withAttributes: lblAttrs)
+    }
+
+    // MARK: - Helpers
 
     private func bearing(of coords: [CLLocationCoordinate2D]) -> CLLocationDirection {
         guard coords.count >= 2 else { return 0 }
@@ -318,8 +404,6 @@ class SnapshotRenderer {
         return atan2(y, x) * 180 / .pi
     }
 
-    // Cache by smoothness bucket (steps of 0.05) so identical smoothness across frames
-    // doesn't recompute the full sliding-box filter hundreds of times.
     private func cachedSmoothed(factor: Double) -> [CLLocationCoordinate2D] {
         let key = Int((factor * 20).rounded())
         if let cached = smoothCache[key] { return cached }
