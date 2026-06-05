@@ -197,23 +197,26 @@ struct ExportView: View {
         .frame(height: 100)
     }
 
+    // Computed outside @ViewBuilder so imperative string-building doesn't
+    // produce Void expressions that the result builder can't handle.
+    private func previewStats() -> (dist: String, time: String, pace: String) {
+        guard let r = vm.route else { return ("—", "—", "—") }
+        let dist = GPXRoute.formatDistance(r.totalDistance)
+        let time = GPXRoute.formatDuration(r.duration)
+        let pace: String = {
+            guard r.totalDistance > 0, r.duration > 0 else { return "—" }
+            let s = r.duration / (r.totalDistance / 1000)
+            return String(format: "%d:%02d", Int(s) / 60, Int(s) % 60)
+        }()
+        return (dist, time, pace)
+    }
+
     @ViewBuilder
     private func statsPreview(w: CGFloat, h: CGFloat, isPortrait: Bool, cornerRadius: CGFloat) -> some View {
-        let distStr: String
-        let timeStr: String
-        let paceStr: String
-        if let r = vm.route {
-            distStr = GPXRoute.formatDistance(r.totalDistance)
-            timeStr = GPXRoute.formatDuration(r.duration)
-            if r.totalDistance > 0 && r.duration > 0 {
-                let s = r.duration / (r.totalDistance / 1000)
-                paceStr = String(format: "%d:%02d", Int(s) / 60, Int(s) % 60)
-            } else {
-                paceStr = "—"
-            }
-        } else {
-            distStr = "—"; timeStr = "—"; paceStr = "—"
-        }
+        let stats = previewStats()
+        let distStr = stats.dist
+        let timeStr = stats.time
+        let paceStr = stats.pace
 
         if isPortrait {
             // Gradient rises from the bottom; stats in a row at the bottom edge
