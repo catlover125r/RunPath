@@ -132,48 +132,34 @@ struct ContentView: View {
 
     private var bottomControls: some View {
         VStack(spacing: 10) {
-            // Play/pause row — play button truly centered, rewind and labels on outer edges
-            ZStack {
-                // Outer labels pinned to edges
-                HStack {
-                    Text(timeLabel)
-                        .font(.system(size: 13, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.5))
-                    Spacer()
-                    Text(String(format: "%.0f%%", vm.progress * 100))
-                        .font(.system(size: 13, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.5))
+            // Play/pause row — rewind left of centered play button
+            HStack(spacing: 14) {
+                Button {
+                    vm.seek(to: 0)
+                } label: {
+                    Image(systemName: "backward.end.fill")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .frame(width: 36, height: 36)
+                        .background(Color.white.opacity(0.1), in: Circle())
                 }
+                .buttonStyle(.plain)
 
-                // Play button centered, rewind offset to its left
-                HStack(spacing: 0) {
-                    Button {
-                        vm.seek(to: 0)
-                    } label: {
-                        Image(systemName: "backward.end.fill")
-                            .font(.system(size: 14))
-                            .foregroundStyle(.white.opacity(0.7))
-                            .frame(width: 36, height: 36)
-                            .background(Color.white.opacity(0.1), in: Circle())
+                Button {
+                    switch vm.playbackState {
+                    case .playing: vm.pause()
+                    case .paused, .idle, .finished: vm.play()
                     }
-                    .buttonStyle(.plain)
-                    .padding(.trailing, 14)
-
-                    Button {
-                        switch vm.playbackState {
-                        case .playing: vm.pause()
-                        case .paused, .idle, .finished: vm.play()
-                        }
-                    } label: {
-                        Image(systemName: playIcon)
-                            .font(.system(size: 18, weight: .semibold))
-                            .foregroundStyle(.black)
-                            .frame(width: 50, height: 50)
-                            .background(Color.white, in: Circle())
-                    }
-                    .buttonStyle(.plain)
+                } label: {
+                    Image(systemName: playIcon)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.black)
+                        .frame(width: 50, height: 50)
+                        .background(Color.white, in: Circle())
                 }
+                .buttonStyle(.plain)
             }
+            .frame(maxWidth: .infinity)
             .padding(.horizontal, 24)
 
             // Timeline
@@ -187,12 +173,6 @@ struct ContentView: View {
         case .playing: return "pause.fill"
         default: return "play.fill"
         }
-    }
-
-    private var timeLabel: String {
-        guard let route = vm.route else { return "0:00" }
-        let elapsed = route.duration * vm.progress
-        return GPXRoute.formatDuration(elapsed)
     }
 
     // MARK: File import
