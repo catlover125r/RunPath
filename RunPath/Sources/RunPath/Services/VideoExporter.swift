@@ -3,6 +3,17 @@ import AVFoundation
 import MapKit
 import UIKit
 
+struct FrameParams {
+    let index: Int
+    let visibleCount: Int
+    let altitude: Double
+    let pitch: Double
+    let lineWidth: CGFloat
+    let lineHue: Double
+    let showFull: Bool
+    let isLandscape: Bool
+}
+
 @MainActor
 class VideoExporter {
 
@@ -14,12 +25,11 @@ class VideoExporter {
     }
 
     enum ExportError: LocalizedError {
-        case assetWriterFailed, snapshotFailed, cancelled
+        case assetWriterFailed, cancelled
 
         var errorDescription: String? {
             switch self {
             case .assetWriterFailed: return "Failed to create video writer."
-            case .snapshotFailed: return "Failed to render frame."
             case .cancelled: return "Export cancelled."
             }
         }
@@ -47,12 +57,15 @@ class VideoExporter {
         }
     }
 
+    // MARK: - Render pipeline
+
     private func render(
         route: GPXRoute,
         settings: AnimationSettings,
         config: ExportConfig,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws -> URL {
+
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("runpath_\(UUID().uuidString).mp4")
 
@@ -87,79 +100,95 @@ class VideoExporter {
         let animationFrames = Int(Double(totalFrames) * 0.85)
         let allCoords = route.clCoordinates
         let isLandscape = config.orientation == .landscape
-        let renderer = await MainActor.run { SnapshotRenderer(route: route, size: config.resolution) }
 
-        for frame in 0..<totalFrames {
+        // Pre-compute every frame's parameters — cheap, avoids repeating work inside TaskGroup
+        let allParams: [FrameParams] = (0..<totalFrames).map { frame in
+            let showFull = frame >= animationFrames
+            let fp = showFull ? 1.0 : Double(frame) / Double(animationFrames)
+            var altitude = settings.value(for: .cameraAltitude, at: fp)
+            var tilt     = settings.value(for: .cameraTilt,     at: fp)
+            let count    = showFull ? allCoords.count : max(1, Int(Double(allCoords.count) * fp))
+            if isLandscape { altitude *= 1.6; tilt = max(0, tilt - 15) }
+            return FrameParams(
+                index:       frame,
+                visibleCount: count,
+                altitude:    showFull ? altitude * 3 : altitude,
+                pitch:       showFull ? max(0, tilt - 20) : tilt,
+                lineWidth:   CGFloat(settings.value(for: .lineThickness, at: fp)),
+                lineHue:     settings.value(for: .lineColor, at: fp),
+                showFull:    showFull,
+                isLandscape: isLandscape
+            )
+        }
+
+        let renderer = SnapshotRenderer(route: route, outputSize: config.resolution)
+        let encodeQueue = DispatchQueue(label: "com.runpath.encode", qos: .userInitiated)
+
+        // Render 4 frames concurrently — MKMapSnapshotter fetches tiles on its own background
+        // threads, so these 4 truly overlap even though we're on MainActor.
+        let batchSize = 4
+
+        for batchStart in stride(from: 0, to: totalFrames, by: batchSize) {
             if cancelled {
                 writer.cancelWriting()
                 throw ExportError.cancelled
             }
 
-            let frameProgress: Double
-            let showFull: Bool
-            if frame < animationFrames {
-                frameProgress = Double(frame) / Double(animationFrames)
-                showFull = false
-            } else {
-                frameProgress = 1.0
-                showFull = true
-            }
+            let batchEnd = min(batchStart + batchSize, totalFrames)
+            let batch = Array(allParams[batchStart..<batchEnd])
 
-            let smoothness = settings.value(for: .smoothness, at: frameProgress)
-            var altitude = settings.value(for: .cameraAltitude, at: frameProgress)
-            var tilt = settings.value(for: .cameraTilt, at: frameProgress)
-            let thickness = settings.value(for: .lineThickness, at: frameProgress)
-            let hue = settings.value(for: .lineColor, at: frameProgress)
-            let coordCount = showFull ? allCoords.count : max(1, Int(Double(allCoords.count) * frameProgress))
-
-            // Landscape needs a higher/wider vantage point to fill the wider frame well
-            if isLandscape { altitude *= 1.6; tilt = max(0, tilt - 15) }
-
-            let img = try await renderer.render(
-                visibleCount: coordCount,
-                altitude: showFull ? altitude * 3 : altitude,
-                pitch: showFull ? max(0, tilt - 20) : tilt,
-                lineWidth: CGFloat(thickness),
-                lineHue: hue,
-                smoothnessFactor: smoothness,
-                showFull: showFull,
-                isLandscape: isLandscape
-            )
-
-            guard let buffer = pixelBuffer(from: img, size: config.resolution) else { continue }
-
-            // Wait for input to be ready on a background thread
-            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                let q = DispatchQueue(label: "com.runpath.encode")
-                q.async {
-                    while !input.isReadyForMoreMediaData { Thread.sleep(forTimeInterval: 0.005) }
-                    let time = CMTime(value: CMTimeValue(frame), timescale: config.frameRate)
-                    adaptor.append(buffer, withPresentationTime: time)
-                    cont.resume()
+            // Concurrent render
+            let images: [UIImage?] = await withTaskGroup(of: (Int, UIImage?).self) { group in
+                for (i, params) in batch.enumerated() {
+                    group.addTask {
+                        let img = try? await renderer.render(params: params)
+                        return (i, img)
+                    }
                 }
+                var results = [UIImage?](repeating: nil, count: batch.count)
+                for await (i, img) in group { results[i] = img }
+                return results
             }
 
-            progress(Double(frame + 1) / Double(totalFrames))
+            // Encode in index order
+            for (i, img) in images.enumerated() {
+                let frameIdx = batchStart + i
+                guard let img else { continue }
+                guard let buffer = pixelBuffer(from: img, size: config.resolution) else { continue }
+
+                await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                    encodeQueue.async {
+                        while !input.isReadyForMoreMediaData {
+                            Thread.sleep(forTimeInterval: 0.002)
+                        }
+                        let time = CMTime(value: CMTimeValue(frameIdx), timescale: config.frameRate)
+                        adaptor.append(buffer, withPresentationTime: time)
+                        cont.resume()
+                    }
+                }
+
+                progress(Double(frameIdx + 1) / Double(totalFrames))
+            }
         }
 
         input.markAsFinished()
         await writer.finishWriting()
 
-        if writer.status == .completed {
-            return outputURL
-        } else {
-            throw writer.error ?? ExportError.assetWriterFailed
-        }
+        if writer.status == .completed { return outputURL }
+        throw writer.error ?? ExportError.assetWriterFailed
     }
+
+    // MARK: - Pixel buffer
 
     private func pixelBuffer(from image: UIImage, size: CGSize) -> CVPixelBuffer? {
         var buffer: CVPixelBuffer?
-        let attrs: [String: Any] = [
-            kCVPixelBufferCGImageCompatibilityKey as String: true,
-            kCVPixelBufferCGBitmapContextCompatibilityKey as String: true
-        ]
-        CVPixelBufferCreate(kCFAllocatorDefault, Int(size.width), Int(size.height),
-                            kCVPixelFormatType_32BGRA, attrs as CFDictionary, &buffer)
+        CVPixelBufferCreate(
+            kCFAllocatorDefault, Int(size.width), Int(size.height),
+            kCVPixelFormatType_32BGRA,
+            [kCVPixelBufferCGImageCompatibilityKey: true,
+             kCVPixelBufferCGBitmapContextCompatibilityKey: true] as CFDictionary,
+            &buffer
+        )
         guard let buf = buffer else { return nil }
         CVPixelBufferLockBaseAddress(buf, [])
         let ctx = CGContext(
@@ -170,67 +199,74 @@ class VideoExporter {
             space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
         )
-        if let cgImage = image.cgImage { ctx?.draw(cgImage, in: CGRect(origin: .zero, size: size)) }
+        if let cg = image.cgImage { ctx?.draw(cg, in: CGRect(origin: .zero, size: size)) }
         CVPixelBufferUnlockBaseAddress(buf, [])
         return buf
     }
 }
 
+// MARK: - Snapshot renderer
+
 @MainActor
 class SnapshotRenderer {
     private let route: GPXRoute
-    private let size: CGSize
+    private let outputSize: CGSize
     private let allCoords: [CLLocationCoordinate2D]
 
-    init(route: GPXRoute, size: CGSize) {
+    // MKMapSnapshotter can't reliably handle sizes above ~1080px on device.
+    // We snapshot at a capped size and composite the path at full output resolution.
+    private let maxSnapshotDim: CGFloat = 1080
+
+    init(route: GPXRoute, outputSize: CGSize) {
         self.route = route
-        self.size = size
+        self.outputSize = outputSize
         self.allCoords = route.clCoordinates
     }
 
-    func render(
-        visibleCount: Int,
-        altitude: Double,
-        pitch: Double,
-        lineWidth: CGFloat,
-        lineHue: Double,
-        smoothnessFactor: Double,
-        showFull: Bool,
-        isLandscape: Bool = false
-    ) async throws -> UIImage {
-        let visibleCoords = Array(allCoords.prefix(max(1, visibleCount)))
-        let center = showFull ? route.centerCoordinate : (visibleCoords.last ?? allCoords[0])
+    func render(params: FrameParams) async throws -> UIImage {
+        let visibleCoords = Array(allCoords.prefix(max(1, params.visibleCount)))
+        let center = params.showFull ? route.centerCoordinate : (visibleCoords.last ?? allCoords[0])
 
-        // In landscape the wide axis is horizontal, so rotating heading 90° puts the
-        // direction of travel across the wide dimension — the route fills the frame naturally.
         let travelHeading = bearing(of: visibleCoords)
-        let cameraHeading = isLandscape ? (travelHeading + 90).truncatingRemainder(dividingBy: 360) : travelHeading
+        let heading = params.isLandscape
+            ? (travelHeading + 90).truncatingRemainder(dividingBy: 360)
+            : travelHeading
+
+        // Cap snapshot size so MKMapSnapshotter never sees > 1080px
+        let maxDim = max(outputSize.width, outputSize.height)
+        let snapshotScale = maxDim > maxSnapshotDim ? maxSnapshotDim / maxDim : 1.0
+        let snapshotSize = CGSize(width: outputSize.width * snapshotScale,
+                                  height: outputSize.height * snapshotScale)
 
         let options = MKMapSnapshotter.Options()
-        options.size = size
+        options.size = snapshotSize
         options.scale = 1
         options.mapType = .standard
         options.camera = MKMapCamera(
             lookingAtCenter: center,
-            fromDistance: altitude,
-            pitch: CGFloat(pitch),
-            heading: cameraHeading
+            fromDistance: params.altitude,
+            pitch: CGFloat(params.pitch),
+            heading: heading
         )
 
         let snapshotter = MKMapSnapshotter(options: options)
         let snapshot = try await snapshotter.start()
 
-        let renderer = UIGraphicsImageRenderer(size: size)
+        // Composite at full output resolution — scales the map up, draws path at full size
+        let upscale = 1.0 / snapshotScale
+        let renderer = UIGraphicsImageRenderer(size: outputSize)
         return renderer.image { _ in
-            snapshot.image.draw(at: .zero)
+            snapshot.image.draw(in: CGRect(origin: .zero, size: outputSize))
             guard visibleCoords.count > 1 else { return }
             let path = UIBezierPath()
-            path.move(to: snapshot.point(for: visibleCoords[0]))
+            let first = snapshot.point(for: visibleCoords[0])
+            path.move(to: CGPoint(x: first.x * upscale, y: first.y * upscale))
             for coord in visibleCoords.dropFirst() {
-                path.addLine(to: snapshot.point(for: coord))
+                let pt = snapshot.point(for: coord)
+                path.addLine(to: CGPoint(x: pt.x * upscale, y: pt.y * upscale))
             }
-            UIColor(hue: CGFloat(lineHue), saturation: 0.85, brightness: 1.0, alpha: 1.0).setStroke()
-            path.lineWidth = lineWidth
+            UIColor(hue: CGFloat(params.lineHue), saturation: 0.85, brightness: 1.0, alpha: 1.0).setStroke()
+            path.lineWidth = params.lineWidth
             path.lineCapStyle = .round
             path.lineJoinStyle = .round
             path.stroke()

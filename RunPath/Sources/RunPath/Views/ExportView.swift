@@ -53,6 +53,7 @@ struct ExportView: View {
     @State private var exportError: String?
     @State private var showShareSheet = false
     @State private var exporter: VideoExporter?
+    @State private var exportStartTime: Date?
     @Environment(\.dismiss) var dismiss
 
     var body: some View {
@@ -243,7 +244,21 @@ struct ExportView: View {
             Text("\(Int(size.width)) × \(Int(size.height))")
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.25))
+            if let eta = estimatedTimeRemaining {
+                Text(eta)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.3))
+            }
         }
+    }
+
+    private var estimatedTimeRemaining: String? {
+        guard exportProgress > 0.04, let start = exportStartTime else { return nil }
+        let elapsed = Date().timeIntervalSince(start)
+        let total = elapsed / exportProgress
+        let remaining = total - elapsed
+        if remaining < 60 { return "~\(Int(remaining))s remaining" }
+        return "~\(Int(remaining / 60))m \(Int(remaining.truncatingRemainder(dividingBy: 60)))s remaining"
     }
 
     // MARK: Done
@@ -288,6 +303,7 @@ struct ExportView: View {
         isExporting = true
         exportError = nil
         exportProgress = 0
+        exportStartTime = Date()
         let config = VideoExporter.ExportConfig(
             resolution: resolution.size(for: orientation),
             orientation: orientation
