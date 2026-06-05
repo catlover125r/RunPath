@@ -1,6 +1,73 @@
 import SwiftUI
 import MapKit
 
+// MARK: - Custom overlay (lives for the lifetime of the route, never replaced)
+
+final class AnimatedPathOverlay: NSObject, MKOverlay {
+    var coordinate: CLLocationCoordinate2D
+    var boundingMapRect: MKMapRect
+    var coordinates: [CLLocationCoordinate2D] = []
+    var visibleCount: Int = 0
+    var lineHue: CGFloat = 0.58
+    var lineWidth: CGFloat = 5
+
+    override init() {
+        coordinate = CLLocationCoordinate2D()
+        boundingMapRect = .world
+        super.init()
+    }
+
+    func update(coordinates: [CLLocationCoordinate2D], visibleCount: Int,
+                lineHue: CGFloat, lineWidth: CGFloat) {
+        self.coordinates = coordinates
+        self.visibleCount = visibleCount
+        self.lineHue = lineHue
+        self.lineWidth = lineWidth
+        // Recompute bounding rect so MapKit knows where to ask for redraws
+        if !coordinates.isEmpty {
+            let mapPoints = coordinates.map { MKMapPoint($0) }
+            let xs = mapPoints.map(\.x), ys = mapPoints.map(\.y)
+            boundingMapRect = MKMapRect(
+                x: xs.min()!, y: ys.min()!,
+                width: xs.max()! - xs.min()!,
+                height: ys.max()! - ys.min()!
+            ).insetBy(dx: -5000, dy: -5000)
+            coordinate = coordinates[coordinates.count / 2]
+        }
+    }
+}
+
+// MARK: - Custom renderer (persistent, just redraws with latest data)
+
+final class AnimatedPathRenderer: MKOverlayRenderer {
+    var pathOverlay: AnimatedPathOverlay { overlay as! AnimatedPathOverlay }
+
+    override func draw(_ mapRect: MKMapRect, zoomScale: MKZoomScale, in context: CGContext) {
+        let overlay = pathOverlay
+        let count = min(overlay.visibleCount, overlay.coordinates.count)
+        guard count > 1 else { return }
+
+        let pts = overlay.coordinates.prefix(count).map { point(for: MKMapPoint($0)) }
+
+        // Line width is in screen points; convert to map-renderer points via zoomScale
+        let width = max(1, overlay.lineWidth / zoomScale)
+
+        context.setStrokeColor(
+            UIColor(hue: overlay.lineHue, saturation: 0.85, brightness: 1.0, alpha: 1.0).cgColor
+        )
+        context.setLineWidth(width)
+        context.setLineCap(.round)
+        context.setLineJoin(.round)
+        context.setShouldAntialias(true)
+
+        context.move(to: pts[0])
+        for pt in pts.dropFirst() { context.addLine(to: pt) }
+        context.strokePath()
+    }
+}
+
+// MARK: - SwiftUI wrapper
+
 struct AnimatedMapView: UIViewRepresentable {
 
     @ObservedObject var vm: AnimationViewModel
@@ -8,7 +75,7 @@ struct AnimatedMapView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> MKMapView {
         let map = MKMapView()
-        map.delegate = context.coordinator   // critical — without this rendererFor never fires
+        map.delegate = context.coordinator
         map.mapType = mapType
         map.showsUserLocation = false
         map.isRotateEnabled = false
@@ -18,6 +85,9 @@ struct AnimatedMapView: UIViewRepresentable {
         map.showsCompass = false
         map.showsScale = false
         map.pointOfInterestFilter = .excludingAll
+
+        // Add the permanent overlay once
+        map.addOverlay(context.coordinator.pathOverlay, level: .aboveRoads)
         context.coordinator.mapView = map
         return map
     }
@@ -27,60 +97,59 @@ struct AnimatedMapView: UIViewRepresentable {
         context.coordinator.update(mapView: mapView, vm: vm)
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(vm: vm)
-    }
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    // MARK: Coordinator
 
     class Coordinator: NSObject, MKMapViewDelegate {
-        let vm: AnimationViewModel
         weak var mapView: MKMapView?
+        let pathOverlay = AnimatedPathOverlay()
+        private weak var pathRenderer: AnimatedPathRenderer?
+
         private var lastVisibleCount = -1
         private var lastShowFull = false
-        private var lastLineHue: Double = -1
-        private var lastLineWidth: Double = -1
-        private var polylineOverlay: MKPolyline?
-        private weak var polylineRenderer: MKPolylineRenderer?
-
-        init(vm: AnimationViewModel) {
-            self.vm = vm
-        }
+        private var lastLineHue: CGFloat = -1
+        private var lastLineWidth: CGFloat = -1
+        private var lastCoordCount = 0
 
         func update(mapView: MKMapView, vm: AnimationViewModel) {
-            let coords = vm.smoothedCoordinates
-            let count = vm.visibleCoordinateCount
+            let coords   = vm.smoothedCoordinates
+            let count    = vm.visibleCoordinateCount
             let showFull = vm.showFullRoute
+            let hue      = CGFloat(vm.lineHue)
+            let width    = CGFloat(vm.lineWidth)
             guard !coords.isEmpty else { return }
 
-            let visibleCount = showFull ? coords.count : max(1, count)
-            let coordsChanged = visibleCount != lastVisibleCount || showFull != lastShowFull
-            let styleChanged = vm.lineHue != lastLineHue || vm.lineWidth != lastLineWidth
+            let visibleCount = showFull ? coords.count : max(0, count)
+            let coordsChanged = coords.count != lastCoordCount
+            let visibleChanged = visibleCount != lastVisibleCount || showFull != lastShowFull
+            let styleChanged   = hue != lastLineHue || width != lastLineWidth
 
-            // Update style on cached renderer without removing/re-adding the overlay
-            if styleChanged, let renderer = polylineRenderer {
-                renderer.strokeColor = UIColor(hue: CGFloat(vm.lineHue), saturation: 0.85,
-                                              brightness: 1.0, alpha: 1.0)
-                renderer.lineWidth = CGFloat(vm.lineWidth)
-                renderer.setNeedsDisplay()
-                lastLineHue = vm.lineHue
-                lastLineWidth = vm.lineWidth
-            }
+            guard coordsChanged || visibleChanged || styleChanged else { return }
 
-            guard coordsChanged else { return }
             lastVisibleCount = visibleCount
-            lastShowFull = showFull
+            lastShowFull     = showFull
+            lastLineHue      = hue
+            lastLineWidth    = width
+            lastCoordCount   = coords.count
 
-            // Replace polyline
-            if let existing = polylineOverlay { mapView.removeOverlay(existing) }
-            let visible = Array(coords.prefix(visibleCount))
-            let poly = MKPolyline(coordinates: visible, count: visible.count)
-            mapView.addOverlay(poly, level: .aboveRoads)
-            polylineOverlay = poly
+            // Push new data into overlay and ask the renderer to redraw — no overlay swap
+            pathOverlay.update(coordinates: coords, visibleCount: visibleCount,
+                               lineHue: hue, lineWidth: width)
+            pathRenderer?.setNeedsDisplay()
 
             // Camera
+            updateCamera(mapView: mapView, vm: vm, coords: coords,
+                         visibleCount: visibleCount, showFull: showFull)
+        }
+
+        private func updateCamera(mapView: MKMapView, vm: AnimationViewModel,
+                                  coords: [CLLocationCoordinate2D],
+                                  visibleCount: Int, showFull: Bool) {
             if showFull {
                 let center = vm.route?.centerCoordinate ?? coords[coords.count / 2]
                 let region = vm.route?.region ?? MKCoordinateRegion()
-                let dist = max(regionDistance(region) * 600, vm.cameraAltitude * 2.5)
+                let dist   = max(regionDistance(region) * 600, vm.cameraAltitude * 2.5)
                 let camera = MKMapCamera(
                     lookingAtCenter: center,
                     fromDistance: dist,
@@ -91,9 +160,9 @@ struct AnimatedMapView: UIViewRepresentable {
                     mapView.setCamera(camera, animated: false)
                 }
             } else {
-                let center = visible.last ?? coords[0]
-                let camera = MKMapCamera(
-                    lookingAtCenter: center,
+                let visible = Array(coords.prefix(max(1, visibleCount)))
+                let camera  = MKMapCamera(
+                    lookingAtCenter: visible.last ?? coords[0],
                     fromDistance: vm.cameraAltitude,
                     pitch: CGFloat(vm.cameraPitch),
                     heading: bearing(of: visible)
@@ -102,21 +171,18 @@ struct AnimatedMapView: UIViewRepresentable {
             }
         }
 
+        // MARK: MKMapViewDelegate
+
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
-            guard let poly = overlay as? MKPolyline else {
+            guard let animated = overlay as? AnimatedPathOverlay else {
                 return MKOverlayRenderer(overlay: overlay)
             }
-            let r = MKPolylineRenderer(polyline: poly)
-            r.strokeColor = UIColor(hue: CGFloat(vm.lineHue), saturation: 0.85,
-                                    brightness: 1.0, alpha: 1.0)
-            r.lineWidth = CGFloat(vm.lineWidth)
-            r.lineCap = .round
-            r.lineJoin = .round
-            polylineRenderer = r
-            lastLineHue = vm.lineHue
-            lastLineWidth = vm.lineWidth
-            return r
+            let renderer = AnimatedPathRenderer(overlay: animated)
+            pathRenderer = renderer
+            return renderer
         }
+
+        // MARK: Helpers
 
         private func bearing(of coords: [CLLocationCoordinate2D]) -> CLLocationDirection {
             guard coords.count >= 2 else { return 0 }
