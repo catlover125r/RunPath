@@ -28,7 +28,7 @@ class AnimationViewModel: ObservableObject {
 
     private var displayLink: CADisplayLink?
     private var lastTickTime: CFTimeInterval = 0        // incremental dt timing
-    private let totalAnimationDuration: Double = 12.0  // base seconds at 1x speed
+    private let totalAnimationDuration: Double = 24.0  // base seconds at 1x speed
 
     // Smoothed-coordinate cache keyed by smoothness bucket (steps of 0.05 → 21 slots max)
     private var smoothCache: [Int: [CLLocationCoordinate2D]] = [:]

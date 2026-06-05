@@ -24,7 +24,7 @@ enum EffectType: String, CaseIterable, Codable, Identifiable {
 
     var range: ClosedRange<Double> {
         switch self {
-        case .speed: return 0.1...6.0
+        case .speed: return 0.1...1.9
         case .smoothness: return 0.0...1.0
         case .cameraAltitude: return 100...25000
         case .cameraTilt: return 0...85

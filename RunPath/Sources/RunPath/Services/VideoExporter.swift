@@ -101,7 +101,7 @@ class VideoExporter {
         let allCoords = route.clCoordinates
         let isLandscape = config.orientation == .landscape
         let dt = 1.0 / Double(config.frameRate)
-        let baseDuration = 12.0
+        let baseDuration = 24.0
 
         // Simulate animation progress using the speed track — matches live playback exactly
         var animProgress: [Double] = []
