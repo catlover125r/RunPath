@@ -46,6 +46,8 @@
 	</array>
 	<key>UIUserInterfaceStyle</key>
 	<string>Dark</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>RunPath saves exported route videos to your Photos library.</string>
 	<key>UTImportedTypeDeclarations</key>
 	<array>
 		<dict>

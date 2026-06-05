@@ -1,4 +1,5 @@
 import SwiftUI
+import Photos
 
 enum ExportOrientation: String, CaseIterable {
     case portrait = "Portrait"
@@ -49,6 +50,8 @@ struct ExportView: View {
     @State private var resolution: ExportResolution = .hd
     @State private var exportProgress: Double = 0
     @State private var isExporting = false
+    @State private var isSavingToPhotos = false
+    @State private var savedToPhotos = false
     @State private var exportedURL: URL?
     @State private var exportError: String?
     @State private var showShareSheet = false
@@ -265,16 +268,34 @@ struct ExportView: View {
 
     private var doneView: some View {
         VStack(spacing: 20) {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 60))
-                .foregroundStyle(.white)
+            ZStack {
+                Circle()
+                    .fill(Color.white.opacity(0.08))
+                    .frame(width: 80, height: 80)
+                if isSavingToPhotos {
+                    ProgressView()
+                        .tint(.white)
+                        .scaleEffect(1.2)
+                } else {
+                    Image(systemName: savedToPhotos ? "photo.fill" : "checkmark")
+                        .font(.system(size: savedToPhotos ? 28 : 32, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+            }
 
-            Text("Export Complete")
-                .font(.system(size: 22, weight: .bold))
-                .foregroundStyle(.white)
+            VStack(spacing: 6) {
+                Text(savedToPhotos ? "Saved to Photos" : "Export Complete")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(.white)
+                if savedToPhotos {
+                    Text("Find it in your Photos library")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+            }
 
             Button { showShareSheet = true } label: {
-                Label("Share Video", systemImage: "square.and.arrow.up")
+                Label("Share", systemImage: "square.and.arrow.up")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(.black)
                     .frame(maxWidth: .infinity)
@@ -287,6 +308,7 @@ struct ExportView: View {
                 exportedURL = nil
                 exportProgress = 0
                 exportError = nil
+                savedToPhotos = false
             } label: {
                 Text("Export Again")
                     .font(.system(size: 15))
@@ -321,12 +343,33 @@ struct ExportView: View {
                 Task { @MainActor in
                     isExporting = false
                     switch result {
-                    case .success(let url): exportedURL = url
-                    case .failure(let err): exportError = err.localizedDescription
+                    case .success(let url):
+                        exportedURL = url
+                        saveToPhotos(url: url)
+                    case .failure(let err):
+                        exportError = err.localizedDescription
                     }
                 }
             }
         )
+    }
+
+    private func saveToPhotos(url: URL) {
+        isSavingToPhotos = true
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+            guard status == .authorized || status == .limited else {
+                Task { @MainActor in isSavingToPhotos = false }
+                return
+            }
+            PHPhotoLibrary.shared().performChanges({
+                PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
+            }) { success, _ in
+                Task { @MainActor in
+                    isSavingToPhotos = false
+                    savedToPhotos = success
+                }
+            }
+        }
     }
 }
 
