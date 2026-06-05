@@ -1,79 +1,72 @@
 import SwiftUI
 import MapKit
 
-// MARK: - Custom overlay (lives for the lifetime of the route, never replaced)
+// MARK: - Screen-space path overlay
 
-final class AnimatedPathOverlay: NSObject, MKOverlay {
-    var coordinate: CLLocationCoordinate2D
-    var boundingMapRect: MKMapRect
-    var coordinates: [CLLocationCoordinate2D] = []
-    var visibleCount: Int = 0
-    var lineHue: CGFloat = 0.58
-    var lineWidth: CGFloat = 5
+// Draws the route as a CAShapeLayer in the view's own coordinate system.
+// Screen-space drawing means line width never changes with camera zoom/tilt,
+// and updates are immediate — no MapKit tile-pipeline lag.
+final class PathOverlayView: UIView {
+    private let shapeLayer = CAShapeLayer()
 
-    override init() {
-        coordinate = CLLocationCoordinate2D()
-        boundingMapRect = .world
-        super.init()
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        isUserInteractionEnabled = false
+        backgroundColor = .clear
+        shapeLayer.fillColor = UIColor.clear.cgColor
+        shapeLayer.lineCap = .round
+        shapeLayer.lineJoin = .round
+        layer.addSublayer(shapeLayer)
     }
 
-    func update(coordinates: [CLLocationCoordinate2D], visibleCount: Int,
-                lineHue: CGFloat, lineWidth: CGFloat) {
-        self.coordinates = coordinates
-        self.visibleCount = visibleCount
-        self.lineHue = lineHue
-        self.lineWidth = lineWidth
-        // Recompute bounding rect so MapKit knows where to ask for redraws
-        if !coordinates.isEmpty {
-            let mapPoints = coordinates.map { MKMapPoint($0) }
-            let xs = mapPoints.map(\.x), ys = mapPoints.map(\.y)
-            boundingMapRect = MKMapRect(
-                x: xs.min()!, y: ys.min()!,
-                width: xs.max()! - xs.min()!,
-                height: ys.max()! - ys.min()!
-            ).insetBy(dx: -5000, dy: -5000)
-            coordinate = coordinates[coordinates.count / 2]
+    required init?(coder: NSCoder) { fatalError() }
+
+    func update(coordinates: [CLLocationCoordinate2D],
+                visibleCount: Int,
+                lineHue: CGFloat,
+                lineWidth: CGFloat,
+                in mapView: MKMapView) {
+        let count = min(visibleCount, coordinates.count)
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        shapeLayer.frame = bounds
+
+        guard count > 1 else {
+            shapeLayer.path = nil
+            CATransaction.commit()
+            return
         }
+
+        let path = CGMutablePath()
+        path.move(to: mapView.convert(coordinates[0], toPointTo: self))
+        for i in 1..<count {
+            path.addLine(to: mapView.convert(coordinates[i], toPointTo: self))
+        }
+
+        shapeLayer.path = path
+        shapeLayer.strokeColor = UIColor(hue: lineHue, saturation: 0.85,
+                                         brightness: 1.0, alpha: 1.0).cgColor
+        shapeLayer.lineWidth = lineWidth
+        CATransaction.commit()
     }
-}
 
-// MARK: - Custom renderer (persistent, just redraws with latest data)
-
-final class AnimatedPathRenderer: MKOverlayRenderer {
-    var pathOverlay: AnimatedPathOverlay { overlay as! AnimatedPathOverlay }
-
-    override func draw(_ mapRect: MKMapRect, zoomScale: MKZoomScale, in context: CGContext) {
-        let overlay = pathOverlay
-        let count = min(overlay.visibleCount, overlay.coordinates.count)
-        guard count > 1 else { return }
-
-        let pts = overlay.coordinates.prefix(count).map { point(for: MKMapPoint($0)) }
-
-        // Line width is in screen points; convert to map-renderer points via zoomScale
-        let width = max(1, overlay.lineWidth / zoomScale)
-
-        context.setStrokeColor(
-            UIColor(hue: overlay.lineHue, saturation: 0.85, brightness: 1.0, alpha: 1.0).cgColor
-        )
-        context.setLineWidth(width)
-        context.setLineCap(.round)
-        context.setLineJoin(.round)
-        context.setShouldAntialias(true)
-
-        context.move(to: pts[0])
-        for pt in pts.dropFirst() { context.addLine(to: pt) }
-        context.strokePath()
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        shapeLayer.frame = bounds
     }
 }
 
 // MARK: - SwiftUI wrapper
 
 struct AnimatedMapView: UIViewRepresentable {
-
     @ObservedObject var vm: AnimationViewModel
     var mapType: MKMapType
 
-    func makeUIView(context: Context) -> MKMapView {
+    // Return a plain container so PathOverlayView is guaranteed above the map
+    func makeUIView(context: Context) -> UIView {
+        let container = UIView()
+
         let map = MKMapView()
         map.delegate = context.coordinator
         map.mapType = mapType
@@ -85,16 +78,25 @@ struct AnimatedMapView: UIViewRepresentable {
         map.showsCompass = false
         map.showsScale = false
         map.pointOfInterestFilter = .excludingAll
+        map.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        container.addSubview(map)
 
-        // Add the permanent overlay once
-        map.addOverlay(context.coordinator.pathOverlay, level: .aboveRoads)
+        let pathView = PathOverlayView()
+        pathView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        container.addSubview(pathView)
+
         context.coordinator.mapView = map
-        return map
+        context.coordinator.pathOverlayView = pathView
+        return container
     }
 
-    func updateUIView(_ mapView: MKMapView, context: Context) {
-        if mapView.mapType != mapType { mapView.mapType = mapType }
-        context.coordinator.update(mapView: mapView, vm: vm)
+    func updateUIView(_ container: UIView, context: Context) {
+        guard let map = context.coordinator.mapView else { return }
+        // Keep subview frames in sync (SwiftUI may resize the container)
+        map.frame = container.bounds
+        context.coordinator.pathOverlayView?.frame = container.bounds
+        if map.mapType != mapType { map.mapType = mapType }
+        context.coordinator.update(mapView: map, vm: vm)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -103,17 +105,9 @@ struct AnimatedMapView: UIViewRepresentable {
 
     class Coordinator: NSObject, MKMapViewDelegate {
         weak var mapView: MKMapView?
-        let pathOverlay = AnimatedPathOverlay()
-        private weak var pathRenderer: AnimatedPathRenderer?
-
-        private var lastVisibleCount = -1
-        private var lastShowFull = false
-        private var lastLineHue: CGFloat = -1
-        private var lastLineWidth: CGFloat = -1
-        private var lastCoordCount = 0
+        var pathOverlayView: PathOverlayView?
 
         func update(mapView: MKMapView, vm: AnimationViewModel) {
-            // Raw coords drive the drawn line; smoothed coords drive the camera only.
             let rawCoords     = vm.route?.clCoordinates ?? []
             let smoothedCoords = vm.smoothedCoordinates
             let count    = vm.visibleCoordinateCount
@@ -123,27 +117,17 @@ struct AnimatedMapView: UIViewRepresentable {
             guard !rawCoords.isEmpty else { return }
 
             let visibleCount = showFull ? rawCoords.count : max(0, count)
-            let coordsChanged = rawCoords.count != lastCoordCount
-            let visibleChanged = visibleCount != lastVisibleCount || showFull != lastShowFull
-            let styleChanged   = hue != lastLineHue || width != lastLineWidth
 
-            guard coordsChanged || visibleChanged || styleChanged else { return }
-
-            lastVisibleCount = visibleCount
-            lastShowFull     = showFull
-            lastLineHue      = hue
-            lastLineWidth    = width
-            lastCoordCount   = rawCoords.count
-
-            // Draw the real GPS path unmodified
-            pathOverlay.update(coordinates: rawCoords, visibleCount: visibleCount,
-                               lineHue: hue, lineWidth: width)
-            pathRenderer?.setNeedsDisplay()
-
-            // Camera follows the smoothed path for a stable, fluid motion
+            // Update camera first — coordinate conversion uses the updated projection
             updateCamera(mapView: mapView, vm: vm,
                          rawCoords: rawCoords, smoothedCoords: smoothedCoords,
                          visibleCount: visibleCount, showFull: showFull)
+
+            // Draw raw GPS path in screen space
+            pathOverlayView?.update(coordinates: rawCoords,
+                                    visibleCount: visibleCount,
+                                    lineHue: hue, lineWidth: width,
+                                    in: mapView)
         }
 
         private func updateCamera(mapView: MKMapView, vm: AnimationViewModel,
@@ -164,7 +148,6 @@ struct AnimatedMapView: UIViewRepresentable {
                     mapView.setCamera(camera, animated: false)
                 }
             } else {
-                // Camera target and heading from the smoothed path
                 let camCoords = smoothedCoords.isEmpty ? rawCoords : smoothedCoords
                 let visible   = Array(camCoords.prefix(max(1, visibleCount)))
                 let camera    = MKMapCamera(
@@ -175,17 +158,6 @@ struct AnimatedMapView: UIViewRepresentable {
                 )
                 mapView.setCamera(camera, animated: false)
             }
-        }
-
-        // MARK: MKMapViewDelegate
-
-        func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
-            guard let animated = overlay as? AnimatedPathOverlay else {
-                return MKOverlayRenderer(overlay: overlay)
-            }
-            let renderer = AnimatedPathRenderer(overlay: animated)
-            pathRenderer = renderer
-            return renderer
         }
 
         // MARK: Helpers
