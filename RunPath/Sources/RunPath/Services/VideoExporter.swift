@@ -252,11 +252,16 @@ class SnapshotRenderer {
     }
 
     func render(params: FrameParams) async throws -> UIImage {
-        let allCoords = cachedSmoothed(factor: params.smoothness)
-        let visibleCoords = Array(allCoords.prefix(max(1, params.visibleCount)))
-        let center = params.showFull ? route.centerCoordinate : (visibleCoords.last ?? allCoords[0])
+        // Smoothed coords: camera position and heading only
+        let smoothed = cachedSmoothed(factor: params.smoothness)
+        let visibleSmoothed = Array(smoothed.prefix(max(1, params.visibleCount)))
 
-        let travelHeading = bearing(of: visibleCoords)
+        // Raw coords: the actual drawn path
+        let visibleRaw = Array(rawCoords.prefix(max(1, params.visibleCount)))
+
+        let center = params.showFull ? route.centerCoordinate : (visibleSmoothed.last ?? smoothed[0])
+
+        let travelHeading = bearing(of: visibleSmoothed)
         let heading = params.isLandscape
             ? (travelHeading + 90).truncatingRemainder(dividingBy: 360)
             : travelHeading
@@ -281,16 +286,16 @@ class SnapshotRenderer {
         let snapshotter = MKMapSnapshotter(options: options)
         let snapshot = try await snapshotter.start()
 
-        // Composite at full output resolution — scales the map up, draws path at full size
+        // Composite at full output resolution — scales the map up, draws raw path at full size
         let upscale = 1.0 / snapshotScale
         let renderer = UIGraphicsImageRenderer(size: outputSize)
         return renderer.image { _ in
             snapshot.image.draw(in: CGRect(origin: .zero, size: outputSize))
-            guard visibleCoords.count > 1 else { return }
+            guard visibleRaw.count > 1 else { return }
             let path = UIBezierPath()
-            let first = snapshot.point(for: visibleCoords[0])
+            let first = snapshot.point(for: visibleRaw[0])
             path.move(to: CGPoint(x: first.x * upscale, y: first.y * upscale))
-            for coord in visibleCoords.dropFirst() {
+            for coord in visibleRaw.dropFirst() {
                 let pt = snapshot.point(for: coord)
                 path.addLine(to: CGPoint(x: pt.x * upscale, y: pt.y * upscale))
             }

@@ -113,15 +113,17 @@ struct AnimatedMapView: UIViewRepresentable {
         private var lastCoordCount = 0
 
         func update(mapView: MKMapView, vm: AnimationViewModel) {
-            let coords   = vm.smoothedCoordinates
+            // Raw coords drive the drawn line; smoothed coords drive the camera only.
+            let rawCoords     = vm.route?.clCoordinates ?? []
+            let smoothedCoords = vm.smoothedCoordinates
             let count    = vm.visibleCoordinateCount
             let showFull = vm.showFullRoute
             let hue      = CGFloat(vm.lineHue)
             let width    = CGFloat(vm.lineWidth)
-            guard !coords.isEmpty else { return }
+            guard !rawCoords.isEmpty else { return }
 
-            let visibleCount = showFull ? coords.count : max(0, count)
-            let coordsChanged = coords.count != lastCoordCount
+            let visibleCount = showFull ? rawCoords.count : max(0, count)
+            let coordsChanged = rawCoords.count != lastCoordCount
             let visibleChanged = visibleCount != lastVisibleCount || showFull != lastShowFull
             let styleChanged   = hue != lastLineHue || width != lastLineWidth
 
@@ -131,23 +133,25 @@ struct AnimatedMapView: UIViewRepresentable {
             lastShowFull     = showFull
             lastLineHue      = hue
             lastLineWidth    = width
-            lastCoordCount   = coords.count
+            lastCoordCount   = rawCoords.count
 
-            // Push new data into overlay and ask the renderer to redraw — no overlay swap
-            pathOverlay.update(coordinates: coords, visibleCount: visibleCount,
+            // Draw the real GPS path unmodified
+            pathOverlay.update(coordinates: rawCoords, visibleCount: visibleCount,
                                lineHue: hue, lineWidth: width)
             pathRenderer?.setNeedsDisplay()
 
-            // Camera
-            updateCamera(mapView: mapView, vm: vm, coords: coords,
+            // Camera follows the smoothed path for a stable, fluid motion
+            updateCamera(mapView: mapView, vm: vm,
+                         rawCoords: rawCoords, smoothedCoords: smoothedCoords,
                          visibleCount: visibleCount, showFull: showFull)
         }
 
         private func updateCamera(mapView: MKMapView, vm: AnimationViewModel,
-                                  coords: [CLLocationCoordinate2D],
+                                  rawCoords: [CLLocationCoordinate2D],
+                                  smoothedCoords: [CLLocationCoordinate2D],
                                   visibleCount: Int, showFull: Bool) {
             if showFull {
-                let center = vm.route?.centerCoordinate ?? coords[coords.count / 2]
+                let center = vm.route?.centerCoordinate ?? rawCoords[rawCoords.count / 2]
                 let region = vm.route?.region ?? MKCoordinateRegion()
                 let dist   = max(regionDistance(region) * 600, vm.cameraAltitude * 2.5)
                 let camera = MKMapCamera(
@@ -160,9 +164,11 @@ struct AnimatedMapView: UIViewRepresentable {
                     mapView.setCamera(camera, animated: false)
                 }
             } else {
-                let visible = Array(coords.prefix(max(1, visibleCount)))
-                let camera  = MKMapCamera(
-                    lookingAtCenter: visible.last ?? coords[0],
+                // Camera target and heading from the smoothed path
+                let camCoords = smoothedCoords.isEmpty ? rawCoords : smoothedCoords
+                let visible   = Array(camCoords.prefix(max(1, visibleCount)))
+                let camera    = MKMapCamera(
+                    lookingAtCenter: visible.last ?? camCoords[0],
                     fromDistance: vm.cameraAltitude,
                     pitch: CGFloat(vm.cameraPitch),
                     heading: bearing(of: visible)
