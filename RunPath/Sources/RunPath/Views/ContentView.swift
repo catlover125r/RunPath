@@ -33,7 +33,7 @@ struct ContentView: View {
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
         .sheet(isPresented: $showExport) {
-            ExportView(vm: vm)
+            ExportView(vm: vm, mapType: useSatellite ? .hybridFlyover : .standard)
         }
         .onOpenURL { url in
             handleIncomingURL(url)

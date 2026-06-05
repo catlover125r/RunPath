@@ -46,6 +46,17 @@ enum EffectType: String, CaseIterable, Codable, Identifiable {
 
     var label: String { rawValue }
 
+    var nudgeAmount: Double {
+        switch self {
+        case .speed:          return 0.1
+        case .smoothness:     return 0.05
+        case .cameraAltitude: return 100
+        case .cameraTilt:     return 5
+        case .lineThickness:  return 0.5
+        case .lineColor:      return 0.05
+        }
+    }
+
     func formatValue(_ v: Double) -> String {
         switch self {
         case .speed: return String(format: "%.1fx", v)

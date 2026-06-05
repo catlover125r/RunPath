@@ -10,6 +10,7 @@ struct FrameParams {
     let pitch: Double
     let lineWidth: CGFloat
     let lineHue: Double
+    let smoothness: Double
     let showFull: Bool
     let isLandscape: Bool
 }
@@ -22,6 +23,7 @@ class VideoExporter {
         var orientation: ExportOrientation = .portrait
         var frameRate: Int32 = 30
         var videoBitrate: Int = 8_000_000
+        var mapType: MKMapType = .standard
     }
 
     enum ExportError: LocalizedError {
@@ -96,32 +98,49 @@ class VideoExporter {
         writer.startWriting()
         writer.startSession(atSourceTime: .zero)
 
-        let totalFrames = 12 * Int(config.frameRate)
-        let animationFrames = Int(Double(totalFrames) * 0.85)
         let allCoords = route.clCoordinates
         let isLandscape = config.orientation == .landscape
+        let dt = 1.0 / Double(config.frameRate)
+        let baseDuration = 12.0
 
-        // Pre-compute every frame's parameters — cheap, avoids repeating work inside TaskGroup
+        // Simulate animation progress using the speed track — matches live playback exactly
+        var animProgress: [Double] = []
+        var p = 0.0
+        while p < 1.0 {
+            animProgress.append(p)
+            let speed = max(0.1, settings.value(for: .speed, at: p))
+            p += (dt * speed) / baseDuration
+        }
+        animProgress.append(1.0)
+
+        let animationFrames = animProgress.count
+        // Pullback: ~15% extra frames at full extent
+        let pullbackCount = max(30, Int(Double(animationFrames) * 0.15))
+        let allProgressValues = animProgress + Array(repeating: 1.0, count: pullbackCount)
+        let totalFrames = allProgressValues.count
+
+        // Pre-compute every frame's parameters
         let allParams: [FrameParams] = (0..<totalFrames).map { frame in
             let showFull = frame >= animationFrames
-            let fp = showFull ? 1.0 : Double(frame) / Double(animationFrames)
+            let fp = allProgressValues[frame]
             var altitude = settings.value(for: .cameraAltitude, at: fp)
             var tilt     = settings.value(for: .cameraTilt,     at: fp)
             let count    = showFull ? allCoords.count : max(1, Int(Double(allCoords.count) * fp))
             if isLandscape { altitude *= 1.6; tilt = max(0, tilt - 15) }
             return FrameParams(
-                index:       frame,
+                index:        frame,
                 visibleCount: count,
-                altitude:    showFull ? altitude * 3 : altitude,
-                pitch:       showFull ? max(0, tilt - 20) : tilt,
-                lineWidth:   CGFloat(settings.value(for: .lineThickness, at: fp)),
-                lineHue:     settings.value(for: .lineColor, at: fp),
-                showFull:    showFull,
-                isLandscape: isLandscape
+                altitude:     showFull ? altitude * 3 : altitude,
+                pitch:        showFull ? max(0, tilt - 20) : tilt,
+                lineWidth:    CGFloat(settings.value(for: .lineThickness, at: fp)),
+                lineHue:      settings.value(for: .lineColor, at: fp),
+                smoothness:   settings.value(for: .smoothness, at: fp),
+                showFull:     showFull,
+                isLandscape:  isLandscape
             )
         }
 
-        let renderer = SnapshotRenderer(route: route, outputSize: config.resolution)
+        let renderer = SnapshotRenderer(route: route, outputSize: config.resolution, mapType: config.mapType)
         let encodeQueue = DispatchQueue(label: "com.runpath.encode", qos: .userInitiated)
 
         // Render 4 frames concurrently — MKMapSnapshotter fetches tiles on its own background
@@ -211,19 +230,20 @@ class VideoExporter {
 class SnapshotRenderer {
     private let route: GPXRoute
     private let outputSize: CGSize
-    private let allCoords: [CLLocationCoordinate2D]
+    private let rawCoords: [CLLocationCoordinate2D]
+    private let mapType: MKMapType
 
-    // MKMapSnapshotter can't reliably handle sizes above ~1080px on device.
-    // We snapshot at a capped size and composite the path at full output resolution.
     private let maxSnapshotDim: CGFloat = 1080
 
-    init(route: GPXRoute, outputSize: CGSize) {
+    init(route: GPXRoute, outputSize: CGSize, mapType: MKMapType) {
         self.route = route
         self.outputSize = outputSize
-        self.allCoords = route.clCoordinates
+        self.rawCoords = route.clCoordinates
+        self.mapType = mapType
     }
 
     func render(params: FrameParams) async throws -> UIImage {
+        let allCoords = applySmoothing(rawCoords, factor: params.smoothness)
         let visibleCoords = Array(allCoords.prefix(max(1, params.visibleCount)))
         let center = params.showFull ? route.centerCoordinate : (visibleCoords.last ?? allCoords[0])
 
@@ -241,7 +261,7 @@ class SnapshotRenderer {
         let options = MKMapSnapshotter.Options()
         options.size = snapshotSize
         options.scale = 1
-        options.mapType = .standard
+        options.mapType = mapType
         options.camera = MKMapCamera(
             lookingAtCenter: center,
             fromDistance: params.altitude,
@@ -282,5 +302,24 @@ class SnapshotRenderer {
         let y = sin(dLon) * cos(lat2)
         let x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
         return atan2(y, x) * 180 / .pi
+    }
+
+    private func applySmoothing(_ coords: [CLLocationCoordinate2D], factor: Double) -> [CLLocationCoordinate2D] {
+        guard coords.count > 5, factor > 0.01 else { return coords }
+        let radius = max(1, Int(factor * 40))
+        let n = coords.count
+        var result = coords
+        for _ in 0..<2 {
+            var pass = result
+            for i in 1..<(n - 1) {
+                let lo = max(0, i - radius), hi = min(n - 1, i + radius)
+                let count = Double(hi - lo + 1)
+                var lat = 0.0, lon = 0.0
+                for j in lo...hi { lat += result[j].latitude; lon += result[j].longitude }
+                pass[i] = CLLocationCoordinate2D(latitude: lat / count, longitude: lon / count)
+            }
+            result = pass
+        }
+        return result
     }
 }

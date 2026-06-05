@@ -1,5 +1,6 @@
 import SwiftUI
 import Photos
+import MapKit
 
 enum ExportOrientation: String, CaseIterable {
     case portrait = "Portrait"
@@ -45,6 +46,7 @@ enum ExportResolution: String, CaseIterable {
 
 struct ExportView: View {
     @ObservedObject var vm: AnimationViewModel
+    let mapType: MKMapType
     @EnvironmentObject var storage: RouteStorage
     @State private var orientation: ExportOrientation = .portrait
     @State private var resolution: ExportResolution = .hd
@@ -328,7 +330,8 @@ struct ExportView: View {
         exportStartTime = Date()
         let config = VideoExporter.ExportConfig(
             resolution: resolution.size(for: orientation),
-            orientation: orientation
+            orientation: orientation,
+            mapType: mapType
         )
         let e = VideoExporter()
         exporter = e
