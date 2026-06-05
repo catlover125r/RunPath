@@ -1,4 +1,5 @@
 import SwiftUI
+import MapKit
 
 struct ContentView: View {
     @EnvironmentObject var storage: RouteStorage
@@ -6,6 +7,7 @@ struct ContentView: View {
     @State private var sidebarOpen = false
     @State private var showExport = false
     @State private var showEmptyHint = true
+    @State private var useSatellite = false
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -43,7 +45,7 @@ struct ContentView: View {
     private var mapLayer: some View {
         ZStack {
             if vm.route != nil {
-                AnimatedMapView(vm: vm)
+                AnimatedMapView(vm: vm, mapType: useSatellite ? .hybridFlyover : .standard)
                     .ignoresSafeArea()
             } else {
                 emptyMapBackground
@@ -88,22 +90,38 @@ struct ContentView: View {
 
             Spacer()
 
-            if vm.route != nil {
-                Button {
-                    showExport = true
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "square.and.arrow.up")
-                            .font(.system(size: 14, weight: .semibold))
-                        Text("Export")
-                            .font(.system(size: 14, weight: .semibold))
+            HStack(spacing: 10) {
+                if vm.route != nil {
+                    // Satellite / Standard toggle
+                    Button {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                            useSatellite.toggle()
+                        }
+                    } label: {
+                        Image(systemName: useSatellite ? "globe.americas.fill" : "map")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(.white)
+                            .frame(width: 40, height: 40)
+                            .background(.ultraThinMaterial, in: Circle())
                     }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(.ultraThinMaterial, in: Capsule())
+                    .buttonStyle(.plain)
+
+                    Button {
+                        showExport = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "square.and.arrow.up")
+                                .font(.system(size: 14, weight: .semibold))
+                            Text("Export")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(.ultraThinMaterial, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
         }
         .padding(.horizontal, 16)

@@ -24,11 +24,11 @@ enum EffectType: String, CaseIterable, Codable, Identifiable {
 
     var range: ClosedRange<Double> {
         switch self {
-        case .speed: return 0.1...4.0
+        case .speed: return 0.1...6.0
         case .smoothness: return 0.0...1.0
-        case .cameraAltitude: return 200...8000
-        case .cameraTilt: return 0...80
-        case .lineThickness: return 1...12
+        case .cameraAltitude: return 100...25000
+        case .cameraTilt: return 0...85
+        case .lineThickness: return 1...24
         case .lineColor: return 0...1
         }
     }
@@ -36,11 +36,11 @@ enum EffectType: String, CaseIterable, Codable, Identifiable {
     var defaultValue: Double {
         switch self {
         case .speed: return 1.0
-        case .smoothness: return 0.5
+        case .smoothness: return 0.7
         case .cameraAltitude: return 1200
         case .cameraTilt: return 55
-        case .lineThickness: return 4
-        case .lineColor: return 0.0
+        case .lineThickness: return 5
+        case .lineColor: return 0.58   // blue-ish by default
         }
     }
 

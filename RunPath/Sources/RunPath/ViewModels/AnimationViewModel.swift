@@ -22,9 +22,12 @@ class AnimationViewModel: ObservableObject {
     // Map state driven by animation
     @Published var cameraAltitude: Double = 1200
     @Published var cameraPitch: Double = 55
-    @Published var lineWidth: Double = 4
-    @Published var lineHue: Double = 0.0
+    @Published var lineWidth: Double = 5
+    @Published var lineHue: Double = 0.58
     @Published var smoothedCoordinates: [CLLocationCoordinate2D] = []
+
+    // Scratchpad: slider value preview when no keyframe is selected (not persisted)
+    @Published var scratchpadValue: Double? = nil
 
     private var displayLink: CADisplayLink?
     private var animationStartTime: CFTimeInterval = 0
@@ -55,17 +58,22 @@ class AnimationViewModel: ObservableObject {
     }
 
     private func applySmoothing(_ coords: [CLLocationCoordinate2D], factor: Double) -> [CLLocationCoordinate2D] {
-        guard coords.count > 3, factor > 0 else { return coords }
-        let passes = Int(factor * 8)
+        guard coords.count > 5, factor > 0.01 else { return coords }
+        // Box filter with a large sliding window — up to 40 points on each side (81-pt window at max)
+        let radius = max(1, Int(factor * 40))
+        let n = coords.count
         var result = coords
-        for _ in 0..<passes {
-            var pass: [CLLocationCoordinate2D] = [result[0]]
-            for i in 1..<result.count - 1 {
-                let lat = (result[i-1].latitude + result[i].latitude * 2 + result[i+1].latitude) / 4
-                let lon = (result[i-1].longitude + result[i].longitude * 2 + result[i+1].longitude) / 4
-                pass.append(CLLocationCoordinate2D(latitude: lat, longitude: lon))
+        // Two passes for a smoother bell-curve-like response
+        for _ in 0..<2 {
+            var pass = result
+            for i in 1..<(n - 1) {
+                let lo = max(0, i - radius)
+                let hi = min(n - 1, i + radius)
+                let count = Double(hi - lo + 1)
+                var lat = 0.0, lon = 0.0
+                for j in lo...hi { lat += result[j].latitude; lon += result[j].longitude }
+                pass[i] = CLLocationCoordinate2D(latitude: lat / count, longitude: lon / count)
             }
-            pass.append(result[result.count - 1])
             result = pass
         }
         return result
@@ -155,8 +163,14 @@ class AnimationViewModel: ObservableObject {
     // MARK: Keyframe editing
 
     func addKeyframeAtPlayhead() {
-        let val = currentTrack.value(at: timelinePosition)
+        // Use scratchpad value if the user has dragged the slider, else use interpolated value
+        let val = scratchpadValue ?? currentTrack.value(at: timelinePosition)
         currentTrack.addKeyframe(at: timelinePosition, value: val)
+        scratchpadValue = nil
+        // Select the newly created keyframe
+        if let newKF = currentTrack.keyframes.min(by: {
+            abs($0.position - timelinePosition) < abs($1.position - timelinePosition)
+        }) { selectedKeyframeID = newKF.id }
         animationSettings.objectWillChange.send()
     }
 
@@ -164,33 +178,51 @@ class AnimationViewModel: ObservableObject {
         guard let kfID = selectedKeyframeID else { return }
         currentTrack.removeKeyframe(id: kfID)
         selectedKeyframeID = nil
+        scratchpadValue = nil
         animationSettings.objectWillChange.send()
     }
 
     func selectKeyframe(_ id: UUID?) {
         selectedKeyframeID = id
-    }
-
-    func updateSelectedKeyframeValue(_ value: Double) {
-        guard let kfID = selectedKeyframeID,
-              let idx = currentTrack.keyframes.firstIndex(where: { $0.id == kfID }) else { return }
-        currentTrack.keyframes[idx].value = value
-        animationSettings.objectWillChange.send()
+        scratchpadValue = nil
     }
 
     func sliderValueForPlayhead() -> Double {
-        currentTrack.value(at: timelinePosition)
+        // Selected keyframe wins, then scratchpad preview, then interpolated
+        if let kfID = selectedKeyframeID,
+           let kf = currentTrack.keyframes.first(where: { $0.id == kfID }) {
+            return kf.value
+        }
+        return scratchpadValue ?? currentTrack.value(at: timelinePosition)
     }
 
     func setSliderValue(_ v: Double) {
         if let kfID = selectedKeyframeID,
            let idx = currentTrack.keyframes.firstIndex(where: { $0.id == kfID }) {
+            // Update the selected keyframe in place
             currentTrack.keyframes[idx].value = v
+            animationSettings.objectWillChange.send()
         } else {
-            currentTrack.addKeyframe(at: timelinePosition, value: v)
-            if let newKF = currentTrack.keyframes.last { selectedKeyframeID = newKF.id }
+            // Just preview — store in scratchpad, do NOT create a keyframe
+            scratchpadValue = v
         }
-        animationSettings.objectWillChange.send()
+        // Always apply visually so the user sees the change immediately
+        applyEffectPreview(animationSettings.selectedEffect, value: v)
+    }
+
+    private func applyEffectPreview(_ effect: EffectType, value: Double) {
+        switch effect {
+        case .cameraAltitude: cameraAltitude = value
+        case .cameraTilt: cameraPitch = value
+        case .lineThickness: lineWidth = value
+        case .lineColor: lineHue = value
+        default: break
+        }
+    }
+
+    func resetScratchpadOnEffectChange() {
+        scratchpadValue = nil
+        selectedKeyframeID = nil
     }
 
     nonisolated deinit {}
