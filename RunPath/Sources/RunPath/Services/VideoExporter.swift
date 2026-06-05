@@ -14,6 +14,7 @@ struct FrameParams {
     let showFull: Bool
     let isLandscape: Bool
     let showStats: Bool
+    let heading: CLLocationDirection
 }
 
 @MainActor
@@ -120,14 +121,30 @@ class VideoExporter {
         let allProgressValues = animProgress + Array(repeating: 1.0, count: pullbackCount)
         let totalFrames = allProgressValues.count
 
-        let allParams: [FrameParams] = (0..<totalFrames).map { frame in
+        // Pre-compute rate-limited camera headings sequentially.
+        // Must be sequential: each frame's heading depends on the previous frame.
+        // Doing this before the parallel snapshot phase avoids shared mutable state.
+        let headings = buildHeadings(
+            totalFrames: totalFrames,
+            animationFrames: animationFrames,
+            allProgressValues: allProgressValues,
+            allCoords: allCoords,
+            isLandscape: isLandscape,
+            frameRate: config.frameRate,
+            settings: settings
+        )
+
+        // Build per-frame parameters (sequential loop so heading array aligns by index)
+        var allParams = [FrameParams]()
+        allParams.reserveCapacity(totalFrames)
+        for frame in 0..<totalFrames {
             let showFull = frame >= animationFrames
             let fp = allProgressValues[frame]
             var altitude = settings.value(for: .cameraAltitude, at: fp)
             var tilt     = settings.value(for: .cameraTilt,     at: fp)
             let count    = showFull ? allCoords.count : max(1, Int(Double(allCoords.count) * fp))
             if isLandscape { altitude *= 1.6; tilt = max(0, tilt - 15) }
-            return FrameParams(
+            allParams.append(FrameParams(
                 index:        frame,
                 visibleCount: count,
                 altitude:     showFull ? altitude * 3 : altitude,
@@ -137,8 +154,9 @@ class VideoExporter {
                 smoothness:   settings.value(for: .smoothness, at: fp),
                 showFull:     showFull,
                 isLandscape:  isLandscape,
-                showStats:    config.showStats
-            )
+                showStats:    config.showStats,
+                heading:      headings[frame]
+            ))
         }
 
         let renderer = SnapshotRenderer(route: route, outputSize: config.resolution, mapType: config.mapType)
@@ -202,6 +220,66 @@ class VideoExporter {
         throw writer.error ?? ExportError.assetWriterFailed
     }
 
+    // MARK: - Heading pre-computation
+
+    private func buildHeadings(
+        totalFrames: Int,
+        animationFrames: Int,
+        allProgressValues: [Double],
+        allCoords: [CLLocationCoordinate2D],
+        isLandscape: Bool,
+        frameRate: Int32,
+        settings: AnimationSettings
+    ) -> [CLLocationDirection] {
+        let maxDeltaPerFrame = 90.0 / Double(frameRate)  // 90°/sec rate limit
+        var headings = [CLLocationDirection](repeating: 0, count: totalFrames)
+        var cur: CLLocationDirection = 0
+        var initialized = false
+
+        for frame in 0..<totalFrames {
+            let showFull = frame >= animationFrames
+            if showFull {
+                // Pullback: look straight down, reset for next run
+                headings[frame] = 0
+                initialized = false
+                cur = 0
+                continue
+            }
+
+            let fp = allProgressValues[frame]
+            let count = max(2, Int(Double(allCoords.count) * fp))
+            let visible = Array(allCoords.prefix(count))
+            let raw = rawBearing(of: visible)
+            let target = isLandscape ? fmod(raw + 90 + 360, 360) : raw
+
+            if !initialized {
+                cur = target
+                initialized = count > 1
+            } else {
+                var diff = target - cur
+                while diff >  180 { diff -= 360 }
+                while diff < -180 { diff += 360 }
+                cur += max(-maxDeltaPerFrame, min(maxDeltaPerFrame, diff))
+                cur = fmod(cur + 360, 360)
+            }
+            headings[frame] = cur
+        }
+        return headings
+    }
+
+    private func rawBearing(of coords: [CLLocationCoordinate2D]) -> CLLocationDirection {
+        guard coords.count >= 2 else { return 0 }
+        let n = min(8, coords.count)
+        let a = coords[coords.count - n], b = coords[coords.count - 1]
+        let dLon = (b.longitude - a.longitude) * .pi / 180
+        let lat1 = a.latitude * .pi / 180, lat2 = b.latitude * .pi / 180
+        let y = sin(dLon) * cos(lat2)
+        let x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
+        var angle = atan2(y, x) * 180 / .pi
+        if angle < 0 { angle += 360 }
+        return angle
+    }
+
     // MARK: - Pixel buffer
 
     private func pixelBuffer(from image: UIImage, size: CGSize) -> CVPixelBuffer? {
@@ -254,10 +332,9 @@ class SnapshotRenderer {
         let visibleRaw = Array(rawCoords.prefix(max(1, params.visibleCount)))
 
         let center = params.showFull ? route.centerCoordinate : (visibleSmoothed.last ?? smoothed[0])
-        let travelHeading = bearing(of: visibleSmoothed)
-        let heading = params.isLandscape
-            ? (travelHeading + 90).truncatingRemainder(dividingBy: 360)
-            : travelHeading
+
+        // Heading is pre-computed and rate-limited by VideoExporter.buildHeadings
+        let heading = params.heading
 
         let maxDim = max(outputSize.width, outputSize.height)
         let snapshotScale = maxDim > maxSnapshotDim ? maxSnapshotDim / maxDim : 1.0
@@ -283,7 +360,6 @@ class SnapshotRenderer {
         return renderer.image { ctx in
             snapshot.image.draw(in: CGRect(origin: .zero, size: outputSize))
 
-            // Draw raw GPS path
             if visibleRaw.count > 1 {
                 let path = UIBezierPath()
                 let first = snapshot.point(for: visibleRaw[0])
@@ -300,7 +376,6 @@ class SnapshotRenderer {
                 path.stroke()
             }
 
-            // Stats overlay
             if params.showStats {
                 drawStatsOverlay(ctx: ctx, size: outputSize)
             }
@@ -312,7 +387,6 @@ class SnapshotRenderer {
     private func drawStatsOverlay(ctx: UIGraphicsRendererContext, size: CGSize) {
         let cgCtx = ctx.cgContext
 
-        // Black gradient from transparent → opaque rising from bottom edge
         let shortSide = min(size.width, size.height)
         let gradHeight = shortSide * 0.40
         let colorSpace = CGColorSpaceCreateDeviceRGB()
@@ -327,7 +401,6 @@ class SnapshotRenderer {
             )
         }
 
-        // Format stat strings
         let distStr = GPXRoute.formatDistance(route.totalDistance)
         let timeStr = GPXRoute.formatDuration(route.duration)
         let paceStr: String
@@ -338,27 +411,26 @@ class SnapshotRenderer {
             paceStr = "—"
         }
 
-        // Font sizes scaled to the short side (consistent across portrait & landscape)
         let distValueSize = shortSide * 0.090
         let sideValueSize = shortSide * 0.054
         let labelSize     = shortSide * 0.026
+        let bottomPad     = size.height * 0.058
+        let labelGap      = shortSide * 0.014
+        let sideOffset    = size.width * 0.28
+        let centerX       = size.width * 0.50
 
-        let bottomPad  = size.height * 0.058
-        let labelGap   = shortSide * 0.014
-        let sideOffset = size.width * 0.28
-        let centerX    = size.width * 0.50
-        let leftX      = centerX - sideOffset
-        let rightX     = centerX + sideOffset
-
-        drawStatColumn(value: distStr,  label: "DISTANCE", cx: centerX,
+        drawStatColumn(value: distStr, label: "DISTANCE",
+                       cx: centerX,
                        valueSize: distValueSize, labelSize: labelSize * 1.1,
                        bottomPad: bottomPad, labelGap: labelGap,
                        valueAlpha: 1.0, labelAlpha: 0.60)
-        drawStatColumn(value: timeStr,  label: "TIME",     cx: leftX,
+        drawStatColumn(value: timeStr, label: "TIME",
+                       cx: centerX - sideOffset,
                        valueSize: sideValueSize, labelSize: labelSize,
                        bottomPad: bottomPad, labelGap: labelGap,
                        valueAlpha: 0.88, labelAlpha: 0.50)
-        drawStatColumn(value: paceStr,  label: "PACE",     cx: rightX,
+        drawStatColumn(value: paceStr, label: "PACE",
+                       cx: centerX + sideOffset,
                        valueSize: sideValueSize, labelSize: labelSize,
                        bottomPad: bottomPad, labelGap: labelGap,
                        valueAlpha: 0.88, labelAlpha: 0.50)
@@ -383,7 +455,6 @@ class SnapshotRenderer {
         let valSz = valNS.size(withAttributes: valAttrs)
         let lblSz = lblNS.size(withAttributes: lblAttrs)
 
-        // Value sits just above the bottom padding, label sits above that
         let valY = size.height - bottomPad - valSz.height
         let lblY = valY - labelGap - lblSz.height
 
@@ -391,18 +462,7 @@ class SnapshotRenderer {
         lblNS.draw(at: CGPoint(x: cx - lblSz.width / 2, y: lblY), withAttributes: lblAttrs)
     }
 
-    // MARK: - Helpers
-
-    private func bearing(of coords: [CLLocationCoordinate2D]) -> CLLocationDirection {
-        guard coords.count >= 2 else { return 0 }
-        let n = min(8, coords.count)
-        let a = coords[coords.count - n], b = coords[coords.count - 1]
-        let dLon = (b.longitude - a.longitude) * .pi / 180
-        let lat1 = a.latitude * .pi / 180, lat2 = b.latitude * .pi / 180
-        let y = sin(dLon) * cos(lat2)
-        let x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
-        return atan2(y, x) * 180 / .pi
-    }
+    // MARK: - Smoothing helpers
 
     private func cachedSmoothed(factor: Double) -> [CLLocationCoordinate2D] {
         let key = Int((factor * 20).rounded())

@@ -92,8 +92,6 @@ struct AnimatedMapView: UIViewRepresentable {
         map.frame = container.bounds
         context.coordinator.pathOverlayView?.frame = container.bounds
         if map.mapType != mapType { map.mapType = mapType }
-        // Wire up the direct Combine subscription so slider/button changes
-        // never wait on SwiftUI's reconciliation cycle.
         context.coordinator.bind(to: vm)
         context.coordinator.update(mapView: map, vm: vm)
     }
@@ -109,15 +107,18 @@ struct AnimatedMapView: UIViewRepresentable {
         private var cancellables = Set<AnyCancellable>()
         private weak var observedVM: AnimationViewModel?
 
-        // Subscribe to vm changes directly so camera and path update immediately
-        // regardless of SwiftUI's update batching.
+        // Heading rate limiter — caps camera rotation at 90°/sec so turnarounds
+        // pan smoothly instead of snapping.
+        private var smoothedHeading: CLLocationDirection = 0
+        private var headingInitialized = false
+        private var lastHeadingTime: CFTimeInterval = 0
+        private let maxHeadingRate: Double = 90.0  // °/sec
+
         func bind(to vm: AnimationViewModel) {
             guard observedVM !== vm else { return }
             observedVM = vm
             cancellables.removeAll()
 
-            // objectWillChange fires BEFORE properties change; .delay(.zero) defers
-            // the sink to the next run-loop turn so we read the updated values.
             vm.objectWillChange
                 .delay(for: .zero, scheduler: RunLoop.main)
                 .sink { [weak self] _ in
@@ -140,12 +141,10 @@ struct AnimatedMapView: UIViewRepresentable {
 
             let visibleCount = showFull ? rawCoords.count : max(0, count)
 
-            // Camera first — coordinate projection depends on the new camera transform
             updateCamera(mapView: mapView, vm: vm,
                          rawCoords: rawCoords, smoothedCoords: smoothedCoords,
                          visibleCount: visibleCount, showFull: showFull)
 
-            // Then draw the raw GPS path in screen space
             pathOverlayView?.update(coordinates: rawCoords,
                                     visibleCount: visibleCount,
                                     lineHue: hue, lineWidth: width,
@@ -157,6 +156,9 @@ struct AnimatedMapView: UIViewRepresentable {
                                   smoothedCoords: [CLLocationCoordinate2D],
                                   visibleCount: Int, showFull: Bool) {
             if showFull {
+                // Reset so the next playback snaps to the initial heading.
+                headingInitialized = false
+
                 let center = vm.route?.centerCoordinate ?? rawCoords[rawCoords.count / 2]
                 let region = vm.route?.region ?? MKCoordinateRegion()
                 let dist   = max(regionDistance(region) * 600, vm.cameraAltitude * 2.5)
@@ -172,11 +174,35 @@ struct AnimatedMapView: UIViewRepresentable {
             } else {
                 let camCoords = smoothedCoords.isEmpty ? rawCoords : smoothedCoords
                 let visible   = Array(camCoords.prefix(max(1, visibleCount)))
-                let camera    = MKMapCamera(
+                let targetHeading = bearing(of: visible)
+
+                let heading: CLLocationDirection
+                if visibleCount <= 1 || !headingInitialized {
+                    // First meaningful frame: snap directly to avoid wind-up.
+                    smoothedHeading = targetHeading
+                    headingInitialized = visibleCount > 1
+                    lastHeadingTime = CACurrentMediaTime()
+                    heading = targetHeading
+                } else {
+                    let now = CACurrentMediaTime()
+                    let dt = min(now - lastHeadingTime, 0.5)
+                    lastHeadingTime = now
+                    var diff = targetHeading - smoothedHeading
+                    // Shortest angular path
+                    while diff >  180 { diff -= 360 }
+                    while diff < -180 { diff += 360 }
+                    let maxDelta = maxHeadingRate * dt
+                    smoothedHeading += max(-maxDelta, min(maxDelta, diff))
+                    smoothedHeading = smoothedHeading.truncatingRemainder(dividingBy: 360)
+                    if smoothedHeading < 0 { smoothedHeading += 360 }
+                    heading = smoothedHeading
+                }
+
+                let camera = MKMapCamera(
                     lookingAtCenter: visible.last ?? camCoords[0],
                     fromDistance: vm.cameraAltitude,
                     pitch: CGFloat(vm.cameraPitch),
-                    heading: bearing(of: visible)
+                    heading: heading
                 )
                 mapView.setCamera(camera, animated: false)
             }
@@ -192,7 +218,9 @@ struct AnimatedMapView: UIViewRepresentable {
             let lat1 = a.latitude * .pi / 180, lat2 = b.latitude * .pi / 180
             let y = sin(dLon) * cos(lat2)
             let x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
-            return atan2(y, x) * 180 / .pi
+            var angle = atan2(y, x) * 180 / .pi
+            if angle < 0 { angle += 360 }
+            return angle
         }
 
         private func regionDistance(_ region: MKCoordinateRegion) -> Double {
