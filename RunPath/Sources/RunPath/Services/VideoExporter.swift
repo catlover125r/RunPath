@@ -8,6 +8,7 @@ class VideoExporter {
 
     struct ExportConfig {
         var resolution: CGSize = CGSize(width: 1080, height: 1920)
+        var orientation: ExportOrientation = .portrait
         var frameRate: Int32 = 30
         var videoBitrate: Int = 8_000_000
     }
@@ -85,6 +86,7 @@ class VideoExporter {
         let totalFrames = 12 * Int(config.frameRate)
         let animationFrames = Int(Double(totalFrames) * 0.85)
         let allCoords = route.clCoordinates
+        let isLandscape = config.orientation == .landscape
         let renderer = await MainActor.run { SnapshotRenderer(route: route, size: config.resolution) }
 
         for frame in 0..<totalFrames {
@@ -104,11 +106,14 @@ class VideoExporter {
             }
 
             let smoothness = settings.value(for: .smoothness, at: frameProgress)
-            let altitude = settings.value(for: .cameraAltitude, at: frameProgress)
-            let tilt = settings.value(for: .cameraTilt, at: frameProgress)
+            var altitude = settings.value(for: .cameraAltitude, at: frameProgress)
+            var tilt = settings.value(for: .cameraTilt, at: frameProgress)
             let thickness = settings.value(for: .lineThickness, at: frameProgress)
             let hue = settings.value(for: .lineColor, at: frameProgress)
             let coordCount = showFull ? allCoords.count : max(1, Int(Double(allCoords.count) * frameProgress))
+
+            // Landscape needs a higher/wider vantage point to fill the wider frame well
+            if isLandscape { altitude *= 1.6; tilt = max(0, tilt - 15) }
 
             let img = try await renderer.render(
                 visibleCount: coordCount,
@@ -117,7 +122,8 @@ class VideoExporter {
                 lineWidth: CGFloat(thickness),
                 lineHue: hue,
                 smoothnessFactor: smoothness,
-                showFull: showFull
+                showFull: showFull,
+                isLandscape: isLandscape
             )
 
             guard let buffer = pixelBuffer(from: img, size: config.resolution) else { continue }
@@ -189,10 +195,16 @@ class SnapshotRenderer {
         lineWidth: CGFloat,
         lineHue: Double,
         smoothnessFactor: Double,
-        showFull: Bool
+        showFull: Bool,
+        isLandscape: Bool = false
     ) async throws -> UIImage {
         let visibleCoords = Array(allCoords.prefix(max(1, visibleCount)))
         let center = showFull ? route.centerCoordinate : (visibleCoords.last ?? allCoords[0])
+
+        // In landscape the wide axis is horizontal, so rotating heading 90° puts the
+        // direction of travel across the wide dimension — the route fills the frame naturally.
+        let travelHeading = bearing(of: visibleCoords)
+        let cameraHeading = isLandscape ? (travelHeading + 90).truncatingRemainder(dividingBy: 360) : travelHeading
 
         let options = MKMapSnapshotter.Options()
         options.size = size
@@ -202,7 +214,7 @@ class SnapshotRenderer {
             lookingAtCenter: center,
             fromDistance: altitude,
             pitch: CGFloat(pitch),
-            heading: bearing(of: visibleCoords)
+            heading: cameraHeading
         )
 
         let snapshotter = MKMapSnapshotter(options: options)
