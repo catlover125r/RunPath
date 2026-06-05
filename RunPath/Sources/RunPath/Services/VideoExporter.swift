@@ -143,9 +143,9 @@ class VideoExporter {
         let renderer = SnapshotRenderer(route: route, outputSize: config.resolution, mapType: config.mapType)
         let encodeQueue = DispatchQueue(label: "com.runpath.encode", qos: .userInitiated)
 
-        // Render 4 frames concurrently — MKMapSnapshotter fetches tiles on its own background
-        // threads, so these 4 truly overlap even though we're on MainActor.
-        let batchSize = 4
+        // 2 concurrent snapshotters — enough overlap without overwhelming MapKit's tile fetcher
+        let batchSize = 2
+        var lastBuffer: CVPixelBuffer?  // fallback for failed frames so no timestamps are skipped
 
         for batchStart in stride(from: 0, to: totalFrames, by: batchSize) {
             if cancelled {
@@ -156,7 +156,6 @@ class VideoExporter {
             let batchEnd = min(batchStart + batchSize, totalFrames)
             let batch = Array(allParams[batchStart..<batchEnd])
 
-            // Concurrent render
             let images: [UIImage?] = await withTaskGroup(of: (Int, UIImage?).self) { group in
                 for (i, params) in batch.enumerated() {
                     group.addTask {
@@ -169,11 +168,19 @@ class VideoExporter {
                 return results
             }
 
-            // Encode in index order
             for (i, img) in images.enumerated() {
                 let frameIdx = batchStart + i
-                guard let img else { continue }
-                guard let buffer = pixelBuffer(from: img, size: config.resolution) else { continue }
+
+                // If rendering failed, fall back to the last good frame so no timestamp is skipped.
+                // Skipped timestamps create gaps that make the video appear to fast-forward.
+                let buffer: CVPixelBuffer?
+                if let img {
+                    buffer = pixelBuffer(from: img, size: config.resolution)
+                } else {
+                    buffer = lastBuffer
+                }
+                guard let buffer else { continue }
+                lastBuffer = buffer
 
                 await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
                     encodeQueue.async {
@@ -235,6 +242,8 @@ class SnapshotRenderer {
 
     private let maxSnapshotDim: CGFloat = 1080
 
+    private var smoothCache: [Int: [CLLocationCoordinate2D]] = [:]
+
     init(route: GPXRoute, outputSize: CGSize, mapType: MKMapType) {
         self.route = route
         self.outputSize = outputSize
@@ -243,7 +252,7 @@ class SnapshotRenderer {
     }
 
     func render(params: FrameParams) async throws -> UIImage {
-        let allCoords = applySmoothing(rawCoords, factor: params.smoothness)
+        let allCoords = cachedSmoothed(factor: params.smoothness)
         let visibleCoords = Array(allCoords.prefix(max(1, params.visibleCount)))
         let center = params.showFull ? route.centerCoordinate : (visibleCoords.last ?? allCoords[0])
 
@@ -302,6 +311,16 @@ class SnapshotRenderer {
         let y = sin(dLon) * cos(lat2)
         let x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
         return atan2(y, x) * 180 / .pi
+    }
+
+    // Cache by smoothness bucket (steps of 0.05) so identical smoothness across frames
+    // doesn't recompute the full sliding-box filter hundreds of times.
+    private func cachedSmoothed(factor: Double) -> [CLLocationCoordinate2D] {
+        let key = Int((factor * 20).rounded())
+        if let cached = smoothCache[key] { return cached }
+        let result = applySmoothing(rawCoords, factor: Double(key) / 20.0)
+        smoothCache[key] = result
+        return result
     }
 
     private func applySmoothing(_ coords: [CLLocationCoordinate2D], factor: Double) -> [CLLocationCoordinate2D] {
