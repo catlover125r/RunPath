@@ -27,9 +27,11 @@ class AnimationViewModel: ObservableObject {
     @Published var smoothedCoordinates: [CLLocationCoordinate2D] = []
 
     private var displayLink: CADisplayLink?
-    private var animationStartTime: CFTimeInterval = 0
-    private var pausedProgress: Double = 0
-    private var totalAnimationDuration: Double = 12.0  // base seconds for full route at 1x speed
+    private var lastTickTime: CFTimeInterval = 0        // incremental dt timing
+    private let totalAnimationDuration: Double = 12.0  // base seconds at 1x speed
+
+    // Smoothed-coordinate cache keyed by smoothness bucket (steps of 0.05 → 21 slots max)
+    private var smoothCache: [Int: [CLLocationCoordinate2D]] = [:]
 
     var currentTrack: EffectTrack {
         animationSettings.track(for: animationSettings.selectedEffect)
@@ -37,6 +39,7 @@ class AnimationViewModel: ObservableObject {
 
     func loadRoute(_ route: GPXRoute) {
         self.route = route
+        smoothCache = [:]
         progress = 0
         timelinePosition = 0
         playbackState = .idle
@@ -50,17 +53,23 @@ class AnimationViewModel: ObservableObject {
 
     private func updateSmoothedCoords(smoothness: Double) {
         guard let route = route else { return }
-        let raw = route.clCoordinates
-        smoothedCoordinates = applySmoothing(raw, factor: smoothness)
+        let key = Int((smoothness * 20).rounded())
+        if let cached = smoothCache[key] {
+            if smoothedCoordinates.count != cached.count || smoothedCoordinates.first?.latitude != cached.first?.latitude {
+                smoothedCoordinates = cached
+            }
+            return
+        }
+        let result = applySmoothing(route.clCoordinates, factor: Double(key) / 20.0)
+        smoothCache[key] = result
+        smoothedCoordinates = result
     }
 
     private func applySmoothing(_ coords: [CLLocationCoordinate2D], factor: Double) -> [CLLocationCoordinate2D] {
         guard coords.count > 5, factor > 0.01 else { return coords }
-        // Box filter with a large sliding window — up to 40 points on each side (81-pt window at max)
         let radius = max(1, Int(factor * 40))
         let n = coords.count
         var result = coords
-        // Two passes for a smoother bell-curve-like response
         for _ in 0..<2 {
             var pass = result
             for i in 1..<(n - 1) {
@@ -80,14 +89,12 @@ class AnimationViewModel: ObservableObject {
         guard route != nil else { return }
         if playbackState == .finished { progress = 0; showFullRoute = false }
         playbackState = .playing
-        pausedProgress = progress
-        animationStartTime = CACurrentMediaTime()
+        lastTickTime = 0  // reset so first tick uses nominal dt, not a stale delta
         startDisplayLink()
     }
 
     func pause() {
         guard playbackState == .playing else { return }
-        pausedProgress = progress
         playbackState = .paused
         stopDisplayLink()
     }
@@ -96,8 +103,7 @@ class AnimationViewModel: ObservableObject {
         progress = max(0, min(1, value))
         timelinePosition = progress
         if playbackState == .playing {
-            pausedProgress = progress
-            animationStartTime = CACurrentMediaTime()
+            lastTickTime = 0  // reset so the next tick doesn't jump from stale delta
         }
         syncVisuals(to: progress)
         if playbackState != .playing { showFullRoute = progress >= 1 }
@@ -115,14 +121,26 @@ class AnimationViewModel: ObservableObject {
         displayLink = nil
     }
 
+    // Incremental integration: each tick advances by (realDt * speed) / baseDuration.
+    // This means speed changes take effect immediately with no jump, and seeking during
+    // playback also doesn't cause overshooting.
     @objc nonisolated private func tick() {
         MainActor.assumeIsolated {
             guard playbackState == .playing else { return }
-            let elapsed = CACurrentMediaTime() - animationStartTime
+
+            let now = CACurrentMediaTime()
+            let dt: Double
+            if lastTickTime > 0 {
+                dt = min(now - lastTickTime, 0.1)  // cap at 100ms to survive backgrounding
+            } else {
+                dt = 1.0 / 60.0  // nominal first-frame delta
+            }
+            lastTickTime = now
+
             let speed = animationSettings.value(for: .speed, at: progress)
-            let clamped = max(0.1, speed)
-            let fraction = (elapsed * clamped) / totalAnimationDuration
-            let newProgress = min(1.0, pausedProgress + fraction)
+            let dp = (dt * max(0.1, speed)) / totalAnimationDuration
+            let newProgress = min(1.0, progress + dp)
+
             progress = newProgress
             timelinePosition = newProgress
             syncVisuals(to: newProgress)
@@ -162,7 +180,6 @@ class AnimationViewModel: ObservableObject {
     func addKeyframeAtPlayhead() {
         let val = currentTrack.value(at: timelinePosition)
         currentTrack.addKeyframe(at: timelinePosition, value: val)
-        // Auto-select the new keyframe
         if let newKF = currentTrack.keyframes.min(by: {
             abs($0.position - timelinePosition) < abs($1.position - timelinePosition)
         }) { selectedKeyframeID = newKF.id }
@@ -188,8 +205,6 @@ class AnimationViewModel: ObservableObject {
         return currentTrack.value(at: timelinePosition)
     }
 
-    // Slider moved: if a keyframe is selected update it; otherwise update the entire
-    // duration by writing to the boundary keyframes (positions 0 and 1).
     func setSliderValue(_ v: Double) {
         let effect = animationSettings.selectedEffect
         let clamped = max(effect.range.lowerBound, min(effect.range.upperBound, v))
@@ -198,13 +213,14 @@ class AnimationViewModel: ObservableObject {
            let idx = currentTrack.keyframes.firstIndex(where: { $0.id == kfID }) {
             currentTrack.keyframes[idx].value = clamped
         } else {
-            // No keyframe selected → apply to whole duration via boundary keyframes
             for i in currentTrack.keyframes.indices
             where currentTrack.keyframes[i].position <= 0.001
                || currentTrack.keyframes[i].position >= 0.999 {
                 currentTrack.keyframes[i].value = clamped
             }
         }
+        // Invalidate smoothness cache when smoothness changes
+        if effect == .smoothness { smoothCache = [:] }
         objectWillChange.send()
         applyLivePreview(effect, value: clamped)
     }
@@ -220,6 +236,10 @@ class AnimationViewModel: ObservableObject {
         case .cameraTilt:     cameraPitch    = value
         case .lineThickness:  lineWidth      = value
         case .lineColor:      lineHue        = value
+        case .smoothness:
+            updateSmoothedCoords(smoothness: value)
+            let count = Int(Double(smoothedCoordinates.count) * timelinePosition)
+            visibleCoordinateCount = max(0, min(count, smoothedCoordinates.count))
         default: break
         }
     }

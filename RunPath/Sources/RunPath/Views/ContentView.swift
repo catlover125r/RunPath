@@ -132,18 +132,21 @@ struct ContentView: View {
 
     private var bottomControls: some View {
         VStack(spacing: 10) {
-            // Play/pause row
-            HStack(spacing: 16) {
-                // Time indicator
-                Text(timeLabel)
-                    .font(.system(size: 13, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.5))
+            // Play/pause row — play button truly centered, rewind and labels on outer edges
+            ZStack {
+                // Outer labels pinned to edges
+                HStack {
+                    Text(timeLabel)
+                        .font(.system(size: 13, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.5))
+                    Spacer()
+                    Text(String(format: "%.0f%%", vm.progress * 100))
+                        .font(.system(size: 13, weight: .medium, design: .monospaced))
+                        .foregroundStyle(.white.opacity(0.5))
+                }
 
-                Spacer()
-
-                // Play controls
-                HStack(spacing: 12) {
-                    // Rewind
+                // Play button centered, rewind offset to its left
+                HStack(spacing: 0) {
                     Button {
                         vm.seek(to: 0)
                     } label: {
@@ -154,8 +157,8 @@ struct ContentView: View {
                             .background(Color.white.opacity(0.1), in: Circle())
                     }
                     .buttonStyle(.plain)
+                    .padding(.trailing, 14)
 
-                    // Play/Pause
                     Button {
                         switch vm.playbackState {
                         case .playing: vm.pause()
@@ -170,13 +173,6 @@ struct ContentView: View {
                     }
                     .buttonStyle(.plain)
                 }
-
-                Spacer()
-
-                // Progress label
-                Text(String(format: "%.0f%%", vm.progress * 100))
-                    .font(.system(size: 13, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.5))
             }
             .padding(.horizontal, 24)
 
