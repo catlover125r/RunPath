@@ -24,7 +24,6 @@ struct SidebarView: View {
 
     private var drawer: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header
             HStack {
                 Text("Routes")
                     .font(.system(size: 22, weight: .bold))
@@ -52,29 +51,53 @@ struct SidebarView: View {
             }
         }
         .frame(width: 300)
-        .background(
-            Color(white: 0.08)
-                .ignoresSafeArea()
-        )
+        .background(Color(white: 0.08).ignoresSafeArea())
         .offset(x: isOpen ? 0 : -320)
     }
 
     private var routeList: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                ForEach(storage.routes) { route in
-                    RouteRowView(route: route, isActive: vm.route?.id == route.id) {
+        List {
+            ForEach(storage.routes) { route in
+                RouteRowView(
+                    route: route,
+                    isActive: vm.route?.id == route.id,
+                    onSelect: {
                         vm.loadRoute(route)
                         close()
-                    } onDelete: {
+                    },
+                    onDelete: {
                         withAnimation { storage.delete(route) }
                         if vm.route?.id == route.id { vm.route = nil }
+                    },
+                    onRename: { newName in
+                        storage.rename(route, to: newName)
+                        // Update the active route's name without resetting animation state
+                        if vm.route?.id == route.id,
+                           let updated = storage.routes.first(where: { $0.id == route.id }) {
+                            vm.route = updated
+                        }
                     }
-                    Divider().overlay(Color.white.opacity(0.07)).padding(.leading, 20)
+                )
+                .listRowBackground(
+                    isActive(route) ? Color.white.opacity(0.05) : Color.clear
+                )
+                .listRowSeparatorTint(Color.white.opacity(0.07))
+                .listRowInsets(EdgeInsets())
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    Button(role: .destructive) {
+                        withAnimation { storage.delete(route) }
+                        if vm.route?.id == route.id { vm.route = nil }
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
                 }
             }
         }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
     }
+
+    private func isActive(_ route: GPXRoute) -> Bool { vm.route?.id == route.id }
 
     private var emptyState: some View {
         VStack(spacing: 12) {
@@ -107,7 +130,10 @@ struct RouteRowView: View {
     let isActive: Bool
     let onSelect: () -> Void
     let onDelete: () -> Void
-    @State private var showMenu = false
+    let onRename: (String) -> Void
+
+    @State private var showingRename = false
+    @State private var newName = ""
 
     private var displayDate: String {
         let date = route.activityDate ?? route.importedAt
@@ -138,12 +164,10 @@ struct RouteRowView: View {
                         Text(displayDate)
                             .font(.system(size: 12))
                             .foregroundStyle(.white.opacity(0.4))
-                        HStack(spacing: 8) {
-                            Label(GPXRoute.formatDistance(route.totalDistance),
-                                  systemImage: "arrow.left.and.right")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.white.opacity(0.35))
-                        }
+                        Label(GPXRoute.formatDistance(route.totalDistance),
+                              systemImage: "arrow.left.and.right")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.white.opacity(0.35))
                     }
                     Spacer()
                 }
@@ -151,6 +175,13 @@ struct RouteRowView: View {
             .buttonStyle(.plain)
 
             Menu {
+                Button {
+                    newName = route.name
+                    showingRename = true
+                } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
+                Divider()
                 Button(role: .destructive, action: onDelete) {
                     Label("Delete Route", systemImage: "trash")
                 }
@@ -166,6 +197,14 @@ struct RouteRowView: View {
         .padding(.leading, 20)
         .padding(.vertical, 10)
         .contentShape(Rectangle())
-        .background(isActive ? Color.white.opacity(0.05) : .clear)
+        .alert("Rename Route", isPresented: $showingRename) {
+            TextField("Route name", text: $newName)
+            Button("Cancel", role: .cancel) { newName = "" }
+            Button("Save") {
+                let trimmed = newName.trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty { onRename(trimmed) }
+                newName = ""
+            }
+        }
     }
 }

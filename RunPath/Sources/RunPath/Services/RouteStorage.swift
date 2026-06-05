@@ -32,6 +32,17 @@ class RouteStorage: ObservableObject {
         persist()
     }
 
+    func rename(_ route: GPXRoute, to name: String) {
+        guard let idx = routes.firstIndex(where: { $0.id == route.id }) else { return }
+        let r = route
+        routes[idx] = GPXRoute(
+            id: r.id, name: name, importedAt: r.importedAt, activityDate: r.activityDate,
+            coordinatesData: r.coordinatesData, totalDistance: r.totalDistance,
+            totalElevationGain: r.totalElevationGain, duration: r.duration
+        )
+        persist()
+    }
+
     private func persist() {
         do {
             let data = try encoder.encode(routes)
