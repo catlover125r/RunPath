@@ -43,7 +43,6 @@ struct EffectControlsView: View {
 
     private var sliderRow: some View {
         let effect = vm.animationSettings.selectedEffect
-        let track = vm.currentTrack
         let sliderVal: Binding<Double> = Binding(
             get: { vm.sliderValueForPlayhead() },
             set: { vm.setSliderValue($0) }
@@ -88,8 +87,6 @@ struct EffectControlsView: View {
             }
             .buttonStyle(.plain)
 
-            // Suppress unused-variable warning for track
-            let _ = track
         }
     }
 }

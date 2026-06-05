@@ -166,14 +166,14 @@ class AnimationViewModel: ObservableObject {
         if let newKF = currentTrack.keyframes.min(by: {
             abs($0.position - timelinePosition) < abs($1.position - timelinePosition)
         }) { selectedKeyframeID = newKF.id }
-        animationSettings.objectWillChange.send()
+        objectWillChange.send()
     }
 
     func deleteSelectedKeyframe() {
         guard let kfID = selectedKeyframeID else { return }
         currentTrack.removeKeyframe(id: kfID)
         selectedKeyframeID = nil
-        animationSettings.objectWillChange.send()
+        objectWillChange.send()
     }
 
     func selectKeyframe(_ id: UUID?) {
@@ -205,7 +205,7 @@ class AnimationViewModel: ObservableObject {
                 currentTrack.keyframes[i].value = clamped
             }
         }
-        animationSettings.objectWillChange.send()
+        objectWillChange.send()
         applyLivePreview(effect, value: clamped)
     }
 
