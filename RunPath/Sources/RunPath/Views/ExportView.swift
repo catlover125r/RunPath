@@ -118,7 +118,6 @@ struct ExportView: View {
                 }
             }
 
-            // Stats overlay toggle
             VStack(alignment: .leading, spacing: 10) {
                 sectionLabel("Overlay")
                 Toggle(isOn: $showStats) {
@@ -168,21 +167,115 @@ struct ExportView: View {
         }
     }
 
+    // MARK: Orientation / stats preview
+
     private var orientationPreview: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: orientation == .portrait ? 10 : 6, style: .continuous)
-                .stroke(Color.white.opacity(0.15), lineWidth: 1.5)
-                .frame(
-                    width: orientation == .portrait ? 52 : 92,
-                    height: orientation == .portrait ? 92 : 52
-                )
-            Image(systemName: "map.fill")
-                .font(.system(size: orientation == .portrait ? 22 : 18))
-                .foregroundStyle(.white.opacity(0.2))
+        let isPortrait = orientation == .portrait
+        let w: CGFloat = isPortrait ? 52 : 92
+        let h: CGFloat = isPortrait ? 92 : 52
+        let r: CGFloat = isPortrait ? 10 : 6
+
+        return ZStack {
+            // Dark map-like fill
+            RoundedRectangle(cornerRadius: r, style: .continuous)
+                .fill(Color(white: 0.17))
+
+            if showStats {
+                statsPreview(w: w, h: h, isPortrait: isPortrait, cornerRadius: r)
+            } else {
+                Image(systemName: "map.fill")
+                    .font(.system(size: isPortrait ? 22 : 18))
+                    .foregroundStyle(.white.opacity(0.2))
+            }
+
+            RoundedRectangle(cornerRadius: r, style: .continuous)
+                .stroke(Color.white.opacity(showStats ? 0.25 : 0.15), lineWidth: 1.5)
         }
+        .frame(width: w, height: h)
         .animation(.spring(response: 0.35, dampingFraction: 0.75), value: orientation)
+        .animation(.easeInOut(duration: 0.22), value: showStats)
         .frame(height: 100)
     }
+
+    @ViewBuilder
+    private func statsPreview(w: CGFloat, h: CGFloat, isPortrait: Bool, cornerRadius: CGFloat) -> some View {
+        let distStr: String
+        let timeStr: String
+        let paceStr: String
+        if let r = vm.route {
+            distStr = GPXRoute.formatDistance(r.totalDistance)
+            timeStr = GPXRoute.formatDuration(r.duration)
+            if r.totalDistance > 0 && r.duration > 0 {
+                let s = r.duration / (r.totalDistance / 1000)
+                paceStr = String(format: "%d:%02d", Int(s) / 60, Int(s) % 60)
+            } else {
+                paceStr = "—"
+            }
+        } else {
+            distStr = "—"; timeStr = "—"; paceStr = "—"
+        }
+
+        if isPortrait {
+            // Gradient rises from the bottom; stats in a row at the bottom edge
+            ZStack(alignment: .bottom) {
+                LinearGradient(colors: [.clear, .black.opacity(0.88)],
+                               startPoint: .top, endPoint: .bottom)
+                    .frame(height: h * 0.50)
+                    .frame(maxWidth: .infinity, alignment: .bottom)
+                    .frame(height: h, alignment: .bottom)
+
+                HStack(alignment: .bottom, spacing: 0) {
+                    miniStatCell(label: "TIME",  value: timeStr, valSize: h * 0.105)
+                        .frame(maxWidth: .infinity)
+                    miniStatCell(label: "DIST",  value: distStr, valSize: h * 0.145)
+                        .frame(maxWidth: .infinity)
+                    miniStatCell(label: "PACE",  value: paceStr, valSize: h * 0.105)
+                        .frame(maxWidth: .infinity)
+                }
+                .padding(.bottom, h * 0.07)
+                .padding(.horizontal, 2)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        } else {
+            // Landscape: gradient from left, stats stacked vertically on the left
+            ZStack {
+                HStack(spacing: 0) {
+                    LinearGradient(colors: [.black.opacity(0.88), .clear],
+                                   startPoint: .leading, endPoint: .trailing)
+                        .frame(width: w * 0.55)
+                    Spacer(minLength: 0)
+                }
+
+                HStack {
+                    VStack(alignment: .center, spacing: max(1, h * 0.06)) {
+                        miniStatCell(label: "DIST",  value: distStr, valSize: h * 0.20)
+                        miniStatCell(label: "TIME",  value: timeStr, valSize: h * 0.13)
+                        miniStatCell(label: "PACE",  value: paceStr, valSize: h * 0.13)
+                    }
+                    .frame(width: w * 0.46)
+                    .frame(maxHeight: .infinity, alignment: .center)
+                    Spacer(minLength: 0)
+                }
+                .padding(.leading, 3)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        }
+    }
+
+    private func miniStatCell(label: String, value: String, valSize: CGFloat) -> some View {
+        VStack(spacing: 0.5) {
+            Text(label)
+                .font(.system(size: max(3, valSize * 0.44), weight: .semibold))
+                .foregroundStyle(.white.opacity(0.55))
+            Text(value)
+                .font(.system(size: max(4, valSize), weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.4)
+        }
+    }
+
+    // MARK: Helpers
 
     private func sectionLabel(_ text: String) -> some View {
         Text(text.uppercased())

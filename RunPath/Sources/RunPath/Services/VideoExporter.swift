@@ -385,61 +385,95 @@ class SnapshotRenderer {
     // MARK: - Stats overlay
 
     private func drawStatsOverlay(ctx: UIGraphicsRendererContext, size: CGSize) {
-        let cgCtx = ctx.cgContext
-
+        let isLandscape = size.width > size.height
         let shortSide = min(size.width, size.height)
-        let gradHeight = shortSide * 0.40
+        let cgCtx = ctx.cgContext
         let colorSpace = CGColorSpaceCreateDeviceRGB()
-        let colors = [UIColor.black.withAlphaComponent(0).cgColor,
-                      UIColor.black.withAlphaComponent(0.82).cgColor] as CFArray
-        if let gradient = CGGradient(colorsSpace: colorSpace, colors: colors, locations: [0.0, 1.0]) {
-            cgCtx.drawLinearGradient(
-                gradient,
-                start: CGPoint(x: 0, y: size.height - gradHeight),
-                end:   CGPoint(x: 0, y: size.height),
-                options: []
-            )
-        }
 
         let distStr = GPXRoute.formatDistance(route.totalDistance)
         let timeStr = GPXRoute.formatDuration(route.duration)
-        let paceStr: String
-        if route.totalDistance > 0 && route.duration > 0 {
-            let secsPerKm = route.duration / (route.totalDistance / 1000)
-            paceStr = String(format: "%d:%02d/km", Int(secsPerKm) / 60, Int(secsPerKm) % 60)
+        let paceStr: String = {
+            guard route.totalDistance > 0, route.duration > 0 else { return "—" }
+            let s = route.duration / (route.totalDistance / 1000)
+            return String(format: "%d:%02d/km", Int(s) / 60, Int(s) % 60)
+        }()
+
+        if isLandscape {
+            // Gradient fades from opaque black at the left edge to transparent
+            let gradWidth = shortSide * 0.44
+            let cols = [UIColor.black.withAlphaComponent(0.84).cgColor,
+                        UIColor.black.withAlphaComponent(0).cgColor] as CFArray
+            if let g = CGGradient(colorsSpace: colorSpace, colors: cols, locations: [0, 1]) {
+                cgCtx.drawLinearGradient(g,
+                    start: CGPoint(x: 0, y: 0),
+                    end:   CGPoint(x: gradWidth, y: 0),
+                    options: [])
+            }
+
+            // Stats stacked vertically, centered on the left side
+            let distValueSize = shortSide * 0.086
+            let sideValueSize = shortSide * 0.052
+            let lblSize       = shortSide * 0.024
+            let intraGap      = shortSide * 0.009
+            let itemGap       = shortSide * 0.028
+
+            let distBlockH = lblSize + intraGap + distValueSize
+            let sideBlockH = lblSize + intraGap + sideValueSize
+            let totalH = distBlockH + itemGap + sideBlockH + itemGap + sideBlockH
+            let startY = (size.height - totalH) / 2
+            let cx = shortSide * 0.155
+
+            drawLandStat(value: distStr, label: "DISTANCE", cx: cx, topY: startY,
+                         valueSize: distValueSize, labelSize: lblSize * 1.1,
+                         intraGap: intraGap, valueAlpha: 1.0, labelAlpha: 0.60)
+            drawLandStat(value: timeStr, label: "TIME", cx: cx,
+                         topY: startY + distBlockH + itemGap,
+                         valueSize: sideValueSize, labelSize: lblSize,
+                         intraGap: intraGap, valueAlpha: 0.88, labelAlpha: 0.50)
+            drawLandStat(value: paceStr, label: "PACE", cx: cx,
+                         topY: startY + distBlockH + itemGap + sideBlockH + itemGap,
+                         valueSize: sideValueSize, labelSize: lblSize,
+                         intraGap: intraGap, valueAlpha: 0.88, labelAlpha: 0.50)
         } else {
-            paceStr = "—"
+            // Gradient rises from the bottom edge to transparent
+            let gradHeight = shortSide * 0.40
+            let cols = [UIColor.black.withAlphaComponent(0).cgColor,
+                        UIColor.black.withAlphaComponent(0.82).cgColor] as CFArray
+            if let g = CGGradient(colorsSpace: colorSpace, colors: cols, locations: [0, 1]) {
+                cgCtx.drawLinearGradient(g,
+                    start: CGPoint(x: 0, y: size.height - gradHeight),
+                    end:   CGPoint(x: 0, y: size.height),
+                    options: [])
+            }
+
+            let distValueSize = shortSide * 0.090
+            let sideValueSize = shortSide * 0.054
+            let labelSize     = shortSide * 0.026
+            let bottomPad     = size.height * 0.058
+            let labelGap      = shortSide * 0.014
+            let sideOffset    = size.width * 0.28
+            let centerX       = size.width * 0.50
+
+            drawPortraitStat(value: distStr, label: "DISTANCE",
+                             cx: centerX, valueSize: distValueSize, labelSize: labelSize * 1.1,
+                             bottomPad: bottomPad, labelGap: labelGap,
+                             valueAlpha: 1.0, labelAlpha: 0.60)
+            drawPortraitStat(value: timeStr, label: "TIME",
+                             cx: centerX - sideOffset, valueSize: sideValueSize, labelSize: labelSize,
+                             bottomPad: bottomPad, labelGap: labelGap,
+                             valueAlpha: 0.88, labelAlpha: 0.50)
+            drawPortraitStat(value: paceStr, label: "PACE",
+                             cx: centerX + sideOffset, valueSize: sideValueSize, labelSize: labelSize,
+                             bottomPad: bottomPad, labelGap: labelGap,
+                             valueAlpha: 0.88, labelAlpha: 0.50)
         }
-
-        let distValueSize = shortSide * 0.090
-        let sideValueSize = shortSide * 0.054
-        let labelSize     = shortSide * 0.026
-        let bottomPad     = size.height * 0.058
-        let labelGap      = shortSide * 0.014
-        let sideOffset    = size.width * 0.28
-        let centerX       = size.width * 0.50
-
-        drawStatColumn(value: distStr, label: "DISTANCE",
-                       cx: centerX,
-                       valueSize: distValueSize, labelSize: labelSize * 1.1,
-                       bottomPad: bottomPad, labelGap: labelGap,
-                       valueAlpha: 1.0, labelAlpha: 0.60)
-        drawStatColumn(value: timeStr, label: "TIME",
-                       cx: centerX - sideOffset,
-                       valueSize: sideValueSize, labelSize: labelSize,
-                       bottomPad: bottomPad, labelGap: labelGap,
-                       valueAlpha: 0.88, labelAlpha: 0.50)
-        drawStatColumn(value: paceStr, label: "PACE",
-                       cx: centerX + sideOffset,
-                       valueSize: sideValueSize, labelSize: labelSize,
-                       bottomPad: bottomPad, labelGap: labelGap,
-                       valueAlpha: 0.88, labelAlpha: 0.50)
     }
 
-    private func drawStatColumn(value: String, label: String,
-                                cx: CGFloat, valueSize: CGFloat, labelSize: CGFloat,
-                                bottomPad: CGFloat, labelGap: CGFloat,
-                                valueAlpha: CGFloat, labelAlpha: CGFloat) {
+    // Portrait: label sits above the value, both anchored to the bottom of the frame
+    private func drawPortraitStat(value: String, label: String,
+                                  cx: CGFloat, valueSize: CGFloat, labelSize: CGFloat,
+                                  bottomPad: CGFloat, labelGap: CGFloat,
+                                  valueAlpha: CGFloat, labelAlpha: CGFloat) {
         let size = outputSize
         let valAttrs: [NSAttributedString.Key: Any] = [
             .font: UIFont.systemFont(ofSize: valueSize, weight: .bold),
@@ -456,10 +490,34 @@ class SnapshotRenderer {
         let lblSz = lblNS.size(withAttributes: lblAttrs)
 
         let valY = size.height - bottomPad - valSz.height
-        let lblY = valY - labelGap - lblSz.height
-
         valNS.draw(at: CGPoint(x: cx - valSz.width / 2, y: valY), withAttributes: valAttrs)
-        lblNS.draw(at: CGPoint(x: cx - lblSz.width / 2, y: lblY), withAttributes: lblAttrs)
+        lblNS.draw(at: CGPoint(x: cx - lblSz.width / 2, y: valY - labelGap - lblSz.height),
+                   withAttributes: lblAttrs)
+    }
+
+    // Landscape: label on top, value below, drawn from topY downward
+    private func drawLandStat(value: String, label: String,
+                               cx: CGFloat, topY: CGFloat,
+                               valueSize: CGFloat, labelSize: CGFloat,
+                               intraGap: CGFloat,
+                               valueAlpha: CGFloat, labelAlpha: CGFloat) {
+        let valAttrs: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: valueSize, weight: .bold),
+            .foregroundColor: UIColor.white.withAlphaComponent(valueAlpha)
+        ]
+        let lblAttrs: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: labelSize, weight: .semibold),
+            .foregroundColor: UIColor.white.withAlphaComponent(labelAlpha),
+            .kern: 1.8 as NSNumber
+        ]
+        let valNS = value as NSString
+        let lblNS = label as NSString
+        let valSz = valNS.size(withAttributes: valAttrs)
+        let lblSz = lblNS.size(withAttributes: lblAttrs)
+
+        lblNS.draw(at: CGPoint(x: cx - lblSz.width / 2, y: topY), withAttributes: lblAttrs)
+        valNS.draw(at: CGPoint(x: cx - valSz.width / 2, y: topY + lblSz.height + intraGap),
+                   withAttributes: valAttrs)
     }
 
     // MARK: - Smoothing helpers
