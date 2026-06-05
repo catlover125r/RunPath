@@ -26,9 +26,6 @@ class AnimationViewModel: ObservableObject {
     @Published var lineHue: Double = 0.58
     @Published var smoothedCoordinates: [CLLocationCoordinate2D] = []
 
-    // Scratchpad: slider value preview when no keyframe is selected (not persisted)
-    @Published var scratchpadValue: Double? = nil
-
     private var displayLink: CADisplayLink?
     private var animationStartTime: CFTimeInterval = 0
     private var pausedProgress: Double = 0
@@ -163,11 +160,9 @@ class AnimationViewModel: ObservableObject {
     // MARK: Keyframe editing
 
     func addKeyframeAtPlayhead() {
-        // Use scratchpad value if the user has dragged the slider, else use interpolated value
-        let val = scratchpadValue ?? currentTrack.value(at: timelinePosition)
+        let val = currentTrack.value(at: timelinePosition)
         currentTrack.addKeyframe(at: timelinePosition, value: val)
-        scratchpadValue = nil
-        // Select the newly created keyframe
+        // Auto-select the new keyframe
         if let newKF = currentTrack.keyframes.min(by: {
             abs($0.position - timelinePosition) < abs($1.position - timelinePosition)
         }) { selectedKeyframeID = newKF.id }
@@ -178,51 +173,55 @@ class AnimationViewModel: ObservableObject {
         guard let kfID = selectedKeyframeID else { return }
         currentTrack.removeKeyframe(id: kfID)
         selectedKeyframeID = nil
-        scratchpadValue = nil
         animationSettings.objectWillChange.send()
     }
 
     func selectKeyframe(_ id: UUID?) {
         selectedKeyframeID = id
-        scratchpadValue = nil
     }
 
     func sliderValueForPlayhead() -> Double {
-        // Selected keyframe wins, then scratchpad preview, then interpolated
         if let kfID = selectedKeyframeID,
            let kf = currentTrack.keyframes.first(where: { $0.id == kfID }) {
             return kf.value
         }
-        return scratchpadValue ?? currentTrack.value(at: timelinePosition)
+        return currentTrack.value(at: timelinePosition)
     }
 
+    // Slider moved: if a keyframe is selected update it; otherwise update the entire
+    // duration by writing to the boundary keyframes (positions 0 and 1).
     func setSliderValue(_ v: Double) {
+        let effect = animationSettings.selectedEffect
+        let clamped = max(effect.range.lowerBound, min(effect.range.upperBound, v))
+
         if let kfID = selectedKeyframeID,
            let idx = currentTrack.keyframes.firstIndex(where: { $0.id == kfID }) {
-            // Update the selected keyframe in place
-            currentTrack.keyframes[idx].value = v
-            animationSettings.objectWillChange.send()
+            currentTrack.keyframes[idx].value = clamped
         } else {
-            // Just preview — store in scratchpad, do NOT create a keyframe
-            scratchpadValue = v
+            // No keyframe selected → apply to whole duration via boundary keyframes
+            for i in currentTrack.keyframes.indices
+            where currentTrack.keyframes[i].position <= 0.001
+               || currentTrack.keyframes[i].position >= 0.999 {
+                currentTrack.keyframes[i].value = clamped
+            }
         }
-        // Always apply visually so the user sees the change immediately
-        applyEffectPreview(animationSettings.selectedEffect, value: v)
+        animationSettings.objectWillChange.send()
+        applyLivePreview(effect, value: clamped)
     }
 
-    private func applyEffectPreview(_ effect: EffectType, value: Double) {
+    func nudge(_ delta: Double) {
+        let current = sliderValueForPlayhead()
+        setSliderValue(current + delta)
+    }
+
+    private func applyLivePreview(_ effect: EffectType, value: Double) {
         switch effect {
         case .cameraAltitude: cameraAltitude = value
-        case .cameraTilt: cameraPitch = value
-        case .lineThickness: lineWidth = value
-        case .lineColor: lineHue = value
+        case .cameraTilt:     cameraPitch    = value
+        case .lineThickness:  lineWidth      = value
+        case .lineColor:      lineHue        = value
         default: break
         }
-    }
-
-    func resetScratchpadOnEffectChange() {
-        scratchpadValue = nil
-        selectedKeyframeID = nil
     }
 
     nonisolated deinit {}

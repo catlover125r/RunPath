@@ -7,13 +7,52 @@ struct TimelineView: View {
     var body: some View {
         VStack(spacing: 0) {
             EffectControlsView(vm: vm)
-            trackLine
+            trackRow
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .padding(.horizontal, 16)
         .padding(.bottom, 8)
+    }
+
+    // Track line + add/delete buttons to the right
+    private var trackRow: some View {
+        HStack(spacing: 10) {
+            trackLine
+
+            // Diamond-shaped add keyframe button
+            Button {
+                vm.addKeyframeAtPlayhead()
+            } label: {
+                DiamondShape()
+                    .fill(Color.white.opacity(0.85))
+                    .frame(width: 16, height: 16)
+                    .overlay(
+                        Image(systemName: "plus")
+                            .font(.system(size: 7, weight: .bold))
+                            .foregroundStyle(.black)
+                    )
+            }
+            .buttonStyle(.plain)
+
+            // Trash button — enabled only when a keyframe is selected
+            Button {
+                vm.deleteSelectedKeyframe()
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(vm.selectedKeyframeID != nil ? .white : .white.opacity(0.25))
+                    .frame(width: 28, height: 28)
+                    .background(
+                        Circle()
+                            .fill(Color.white.opacity(vm.selectedKeyframeID != nil ? 0.12 : 0.04))
+                    )
+            }
+            .buttonStyle(.plain)
+            .disabled(vm.selectedKeyframeID == nil)
+        }
+        .frame(height: 36)
     }
 
     private var trackLine: some View {
